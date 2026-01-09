@@ -980,7 +980,7 @@ class Simulation:
             (not state.silence_mode and (
                 # Adjusted conditions: expression threshold + vocabulary requirement
                 (state.drives.expression > 0.30 and vocab_size >= 8) or
-                state.turn % 100 == 0  # Heartbeat every 10 turns
+                state.turn % 10 == 0  # Heartbeat every 10 turns
             ))
         )
         
