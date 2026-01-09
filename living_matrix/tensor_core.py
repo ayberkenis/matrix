@@ -294,7 +294,7 @@ class TensorCognition:
         elif len(self.motif_registry) > 0:
             # Medium novelty: perturb recent motif
             recent_motif = self.motif_registry[-1]
-            perturbation = torch.randn(self.embedding_dim) * (0.05 + 0.1 * novelty_drive)
+            perturbation = torch.randn(self.embedding_dim, device=self.device) * (0.05 + 0.1 * novelty_drive)
             internal_motif = recent_motif + perturbation
             self._last_internal_tokens = []  # No tokens for pure motif perturbation
             
@@ -704,7 +704,7 @@ class TensorCognition:
             top_k = min(5, len(scored))
             top_candidates = scored[:top_k]
             scores = [s[0] for s in top_candidates]
-            scores_tensor = torch.tensor(scores) / effective_temperature
+            scores_tensor = torch.tensor(scores, device=self.device) / effective_temperature
             probs = F.softmax(scores_tensor, dim=0)
             torch.manual_seed(self.seed + hash(tuple(scores)) % 1000)
             idx = torch.multinomial(probs, 1).item()
@@ -809,6 +809,9 @@ class TensorCognition:
             vocab_size=data.get("vocab_size", 10000),
             seed=data.get("seed", 42)
         )
+        # Device is already set in __init__, ensure modules are on device
+        obj.embeddings = obj.embeddings.to(obj.device)
+        obj.encoder = obj.encoder.to(obj.device)
         
         obj.token_to_id = data.get("token_to_id", {})
         obj.id_to_token = {int(k): v for k, v in data.get("id_to_token", {}).items()}

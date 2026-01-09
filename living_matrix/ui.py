@@ -66,7 +66,9 @@ Available commands:
   /status            Show drives + tensor stats without generating text
   /run               Start autopilot (world simulation)
   /pause             Pause autopilot
-  /speed <ms>        Set tick delay in milliseconds (default 250)
+  /speed <ms>        Set tick delay in milliseconds (default 50)
+  /device            Show current PyTorch device (CPU/CUDA)
+  /auto [on|off]     Toggle autonomous mode (default: ON)
   /tick <n>          Advance world simulation by n turns
   /step <n>          Alias for /tick
   /time              Show current time

@@ -724,7 +724,8 @@ class Simulation:
                 decay_weight = (state.stimulus_decay_factor ** turns_since)
                 if decay_weight > 0.01 and state.tensor_cognition:  # Only if still significant
                     import torch
-                    decayed_motif = torch.tensor(state.last_stimulus_tensor, dtype=torch.float32)
+                    device = state.tensor_cognition.device if state.tensor_cognition else torch.device("cpu")
+                    decayed_motif = torch.tensor(state.last_stimulus_tensor, dtype=torch.float32, device=device)
                     drives_list = [state.drives.stability, state.drives.novelty,
                                   state.drives.cohesion, state.drives.expression]
                     state.tensor_cognition.update_from_internal_motif(
