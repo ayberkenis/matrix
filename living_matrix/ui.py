@@ -76,10 +76,14 @@ Available commands:
   /map               List regions and locations
   /where             Show current hotspots with crowd sizes
   /events            Show last 10 events
-  /agents            Show agent summary by role
+  /agents            List human agents (id, name, district, role, hunger, mood)
   /agent <id|name>   Show detailed agent information
+  /districts         List district stats (food_stock, tension, jobs, scarcity)
+  /economy          Global economy snapshot
   /follow <id|name>  Follow an agent in bulletins
   /unfollow          Stop following
+  /cam [mode] [target]  Camera controls (god|district|agent|place)
+  /ui [on|off|clear|mode|fps]  UI panel controls
   /export            Export semantic graph to data/graph.json
   /quit              Exit the simulation
 

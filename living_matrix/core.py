@@ -22,6 +22,10 @@ from .world_sim import (
 )
 from .world_sim.bulletin import format_world_bulletin
 from .world_sim.consequence import ConsequenceSystem
+from .human_agent import HumanAgentSystem
+from .economy import EconomySystem
+from .camera import Camera, CameraMode
+from .ui_panels import UIPanels, UISettings
 
 
 class Simulation:
@@ -43,6 +47,13 @@ class Simulation:
         self.weather_system: Optional[WeatherSystem] = None
         self.agent_system: Optional[AgentSystem] = None
         self.event_system: Optional[EventSystem] = None
+        self.consequence_system: Optional[ConsequenceSystem] = None
+        
+        # New systems
+        self.human_agent_system: Optional[HumanAgentSystem] = None
+        self.economy_system: Optional[EconomySystem] = None
+        self.camera = Camera()
+        self.ui_panels = UIPanels()
         
         # Autopilot settings
         self.autopilot = autopilot_enabled
@@ -50,6 +61,7 @@ class Simulation:
         self.bulletin_interval = 5  # Print bulletin every N turns
         self.follow_agent_id: Optional[str] = None  # Agent to follow
         self.world_turn_counter = 0  # Track world turns for bulletin
+        self._last_human_events: List = []  # Store human agent events for rendering
     
     def initialize(self):
         """Initialize simulation state."""
@@ -75,6 +87,19 @@ class Simulation:
             self.time_system, self.world_map, self.weather_system, \
                 self.agent_system, self.event_system = loaded
             self.consequence_system = ConsequenceSystem(seed=self.world.state.seed)
+            
+            # Initialize new systems (even if loaded, we need them)
+            district_ids = list(self.world_map.regions.keys())
+            location_ids = list(self.world_map.locations.keys())
+            if not self.human_agent_system:
+                self.human_agent_system = HumanAgentSystem(
+                    districts=district_ids,
+                    locations=location_ids,
+                    num_agents=random.randint(12, 30),
+                    seed=self.world.state.seed
+                )
+            if not self.economy_system:
+                self.economy_system = EconomySystem(districts=district_ids, seed=self.world.state.seed)
         else:
             # Create new world simulation
             self.time_system = TimeSystem(seed=self.world.state.seed)
@@ -89,6 +114,17 @@ class Simulation:
             
             self.event_system = EventSystem(seed=self.world.state.seed)
             self.consequence_system = ConsequenceSystem(seed=self.world.state.seed)
+            
+            # Initialize new systems
+            district_ids = list(self.world_map.regions.keys())
+            location_ids = list(self.world_map.locations.keys())
+            self.human_agent_system = HumanAgentSystem(
+                districts=district_ids,
+                locations=location_ids,
+                num_agents=random.randint(12, 30),
+                seed=self.world.state.seed
+            )
+            self.economy_system = EconomySystem(districts=district_ids, seed=self.world.state.seed)
     
     def process_command(self, line: str) -> bool:
         """
@@ -441,8 +477,19 @@ class Simulation:
             return True
         
         elif cmd == "/agents":
-            if self.agent_system:
-                # Count by role
+            # Show human agents (new system)
+            if self.human_agent_system:
+                agents = list(self.human_agent_system.agents.values())
+                print(f"Human Agents ({len(agents)}):")
+                print(f"{'ID':<12} {'Name':<12} {'District':<12} {'Role':<10} {'Hunger':<8} {'Mood':<8}")
+                print("-" * 70)
+                for agent in agents[:20]:  # Show first 20
+                    needs = agent.needs
+                    print(f"{agent.id:<12} {agent.name:<12} {agent.district[:11]:<12} {agent.role:<10} {needs.hunger:<8} {agent.mood:+.2f}")
+                if len(agents) > 20:
+                    print(f"... and {len(agents) - 20} more")
+            elif self.agent_system:
+                # Fallback to old system
                 role_counts = {}
                 for agent in self.agent_system.agents.values():
                     role_counts[agent.role] = role_counts.get(agent.role, 0) + 1
@@ -468,6 +515,41 @@ class Simulation:
                 print("Usage: /agent <id|name>")
                 return True
             
+            # Try human agent system first
+            if self.human_agent_system:
+                agent = self.human_agent_system.get_agent(args.strip())
+                if not agent:
+                    agent = self.human_agent_system.get_agent_by_name(args.strip())
+                
+                if agent:
+                    # Print detailed agent info
+                    print(f"\nAgent: {agent.name} ({agent.id})")
+                    print(f"Role: {agent.role} | District: {agent.district} | Location: {agent.location}")
+                    print(f"\nNeeds:")
+                    print(f"  Hunger: {agent.needs.hunger}/100")
+                    print(f"  Rest: {agent.needs.rest}/100")
+                    print(f"  Safety: {agent.needs.safety}/100")
+                    print(f"  Belonging: {agent.needs.belonging}/100")
+                    print(f"  Purpose: {agent.needs.purpose}/100")
+                    print(f"\nTraits:")
+                    print(f"  Risk: {agent.traits.risk:.2f}")
+                    print(f"  Empathy: {agent.traits.empathy:.2f}")
+                    print(f"  Ambition: {agent.traits.ambition:.2f}")
+                    print(f"  Patience: {agent.traits.patience:.2f}")
+                    print(f"\nInventory:")
+                    print(f"  Food: {agent.inventory.food}")
+                    print(f"  Credits: {agent.inventory.credits}")
+                    print(f"  Tools: {agent.inventory.tools}")
+                    print(f"\nMood: {agent.mood:+.2f}")
+                    print(f"Current Action: {agent.current_action}")
+                    print(f"Goals: {', '.join(agent.goals)}")
+                    if agent.memory:
+                        print(f"\nRecent Memory:")
+                        for mem in list(agent.memory)[-5:]:
+                            print(f"  • {mem}")
+                    return True
+            
+            # Fallback to old agent system
             if not self.agent_system:
                 print("World simulation not initialized.")
                 return True
@@ -523,6 +605,104 @@ class Simulation:
         elif cmd == "/unfollow":
             self.follow_agent_id = None
             print("Stopped following.")
+            return True
+        
+        elif cmd == "/districts":
+            """List district stats (food_stock, tension, jobs)."""
+            if not self.economy_system or not self.world_map:
+                print("Economy system not initialized.")
+                return True
+            
+            print("Districts:")
+            print(f"{'District':<15} {'Food':<8} {'Tension':<10} {'Jobs':<8} {'Scarcity':<10}")
+            print("-" * 60)
+            for district in self.economy_system.get_all_districts():
+                scarcity_str = "YES" if district.scarcity else "NO"
+                print(f"{district.district_name:<15} {district.food_stock:<8} {district.tension:<10} {district.jobs_available:<8} {scarcity_str:<10}")
+            return True
+        
+        elif cmd == "/economy":
+            """Global economy snapshot."""
+            if not self.economy_system:
+                print("Economy system not initialized.")
+                return True
+            
+            districts = self.economy_system.get_all_districts()
+            total_food = sum(d.food_stock for d in districts)
+            total_credits = sum(d.credits_pool for d in districts)
+            avg_tension = sum(d.tension for d in districts) / len(districts) if districts else 0
+            scarcity_count = sum(1 for d in districts if d.scarcity)
+            
+            print("Global Economy:")
+            print(f"  Total Food Stock: {total_food}")
+            print(f"  Total Credits Pool: {total_credits}")
+            print(f"  Average Tension: {avg_tension:.1f}")
+            print(f"  Districts with Scarcity: {scarcity_count}/{len(districts)}")
+            return True
+        
+        elif cmd == "/cam" or cmd == "/camera":
+            """Camera controls."""
+            if not args:
+                print(f"Current camera mode: {self.camera.get_mode_string()}")
+                return True
+            
+            parts = args.strip().split(None, 1)
+            mode = parts[0].lower()
+            target = parts[1] if len(parts) > 1 else None
+            
+            if self.camera.set_mode(mode, target):
+                print(f"Camera mode: {self.camera.get_mode_string()}")
+            else:
+                print("Usage: /cam [god|district <name>|agent <id|name>|place <name>]")
+            return True
+        
+        elif cmd == "/ui":
+            """UI controls."""
+            if not args:
+                print(f"UI enabled: {self.ui_panels.settings.enabled}")
+                print(f"Clear screen: {self.ui_panels.settings.clear_screen}")
+                print(f"Mode: {self.ui_panels.settings.mode}")
+                print(f"FPS limit: {self.ui_panels.settings.fps_limit}")
+                return True
+            
+            parts = args.strip().split()
+            subcmd = parts[0].lower()
+            
+            if subcmd == "on":
+                self.ui_panels.settings.enabled = True
+                print("UI enabled")
+            elif subcmd == "off":
+                self.ui_panels.settings.enabled = False
+                print("UI disabled")
+            elif subcmd == "clear":
+                if len(parts) > 1:
+                    clear_val = parts[1].lower()
+                    self.ui_panels.settings.clear_screen = (clear_val == "on")
+                    print(f"Clear screen: {self.ui_panels.settings.clear_screen}")
+                else:
+                    print("Usage: /ui clear [on|off]")
+            elif subcmd == "mode":
+                if len(parts) > 1:
+                    mode_val = parts[1].lower()
+                    if mode_val in ["compact", "full"]:
+                        self.ui_panels.settings.mode = mode_val
+                        print(f"UI mode: {mode_val}")
+                    else:
+                        print("Usage: /ui mode [compact|full]")
+                else:
+                    print("Usage: /ui mode [compact|full]")
+            elif subcmd == "fps":
+                if len(parts) > 1:
+                    try:
+                        fps = int(parts[1])
+                        self.ui_panels.settings.fps_limit = max(0, fps)
+                        print(f"FPS limit: {self.ui_panels.settings.fps_limit}")
+                    except ValueError:
+                        print("Usage: /ui fps <number>")
+                else:
+                    print("Usage: /ui fps <number>")
+            else:
+                print("Usage: /ui [on|off|clear|mode|fps]")
             return True
         
         elif cmd == "/quit":
@@ -887,6 +1067,10 @@ class Simulation:
         # Increment turn (always, even in silence)
         state.turn += 1
         
+        # Render UI if enabled and should render
+        if self.ui_panels.should_render(state.turn) or should_speak:
+            self._render_ui(state.turn)
+        
         # Debug output
         if self.debug_mode and should_speak:
             num_nodes = len(state.semantic_graph.nodes)
@@ -937,6 +1121,10 @@ class Simulation:
         
         # Advance turn
         self.world.advance_turn()
+        
+        # Render UI if enabled and should render
+        if self.ui_panels.should_render(state.turn) or should_speak:
+            self._render_ui(state.turn)
         
         # Advance world simulation if initialized
         if self.time_system and self.world_map and self.weather_system and \
@@ -993,6 +1181,40 @@ class Simulation:
         new_events = self.event_system.advance(
             self.world_map, self.agent_system, agent_actions, tensor_modifier
         )
+        
+        # Advance economy and human agents per district
+        if self.economy_system and self.human_agent_system and self.world_map:
+            all_human_events = []
+            for district_id, region in self.world_map.regions.items():
+                # Get agents in this district
+                district_agents = [a for a in self.human_agent_system.agents.values() 
+                                 if a.district == district_id]
+                agent_count = len(district_agents)
+                
+                # Get district resources
+                district_resources = self.economy_system.get_district_resources(district_id)
+                
+                # Advance economy
+                self.economy_system.advance(district_id, agent_count, [])
+                
+                # Advance human agents
+                location_ids = [loc.id for loc in region.locations]
+                human_events = self.human_agent_system.advance(
+                    district_resources, location_ids, self.world_map, self.world.state.turn
+                )
+                all_human_events.extend(human_events)
+                
+                # Update economy tension with human events
+                event_descriptions = [e[1] for e in human_events]
+                self.economy_system.update_tension(district_id, event_descriptions)
+                
+                # Generate economy events
+                economy_events = self.economy_system.generate_events(district_id)
+                for evt in economy_events:
+                    all_human_events.append(("economy", evt, "economy"))
+            
+            # Store human events for UI rendering
+            self._last_human_events = all_human_events
     
     def _advance_agents_with_consequences(self, hour: int) -> List[Tuple[str, str]]:
         """Advance agents with consequence-driven decision making."""
@@ -1142,6 +1364,70 @@ class Simulation:
                 return f"{agent.name} moves to {loc.name}"
         
         return f"{agent.name} is at {current_loc.name}"
+    
+    def _render_ui(self, turn: int):
+        """Render UI panels based on camera mode."""
+        if not self.ui_panels.settings.enabled:
+            return
+        
+        # Get header
+        if self.time_system and self.weather_system:
+            header = f"{self.time_system.format_time()} | {self.weather_system.format_weather_line()}"
+        else:
+            header = f"Turn {turn}"
+        
+        # Get districts for minimap/heatmap
+        districts = list(self.world_map.regions.values()) if self.world_map else []
+        district_names = [d.name for d in districts]
+        
+        # Get agents for minimap
+        agents = list(self.human_agent_system.agents.values()) if self.human_agent_system else []
+        
+        # Render minimap
+        focused_agent_id = None
+        if self.camera.mode == CameraMode.AGENT and self.camera.target_agent_id:
+            focused_agent_id = self.camera.target_agent_id
+        minimap_lines = self.ui_panels.render_minimap(district_names, agents, focused_agent_id)
+        
+        # Render heatmap
+        heatmap_lines = self.ui_panels.render_heatmap(districts, self.economy_system)
+        
+        # Get events
+        events = self._last_human_events if hasattr(self, '_last_human_events') else []
+        if self.event_system:
+            recent_events = self.event_system.get_recent_events(n=10)
+            events.extend([e.description for e in recent_events])
+        event_feed_lines = self.ui_panels.render_event_feed(events)
+        
+        # Render based on camera mode
+        agent_list_lines = None
+        agent_panel_lines = None
+        
+        if self.camera.mode == CameraMode.AGENT and self.camera.target_agent_id:
+            # AGENT mode: show agent panel
+            agent = None
+            if self.human_agent_system:
+                agent = self.human_agent_system.get_agent(self.camera.target_agent_id)
+                if not agent:
+                    agent = self.human_agent_system.get_agent_by_name(self.camera.target_agent_id)
+            if agent:
+                agent_panel_lines = self.ui_panels.render_agent_panel(agent)
+        elif self.camera.mode == CameraMode.DISTRICT and self.camera.target_district:
+            # DISTRICT mode: show agents in district
+            if self.human_agent_system:
+                district_agents = self.human_agent_system.get_agents_in_district(self.camera.target_district)
+                agent_list_lines = self.ui_panels.render_agent_list(district_agents, max_agents=10)
+        else:
+            # GOD mode or default: show top agents
+            if self.human_agent_system:
+                all_agents = list(self.human_agent_system.agents.values())
+                agent_list_lines = self.ui_panels.render_agent_list(all_agents, max_agents=8)
+        
+        # Render screen
+        self.ui_panels.render_screen(
+            header, minimap_lines, heatmap_lines, event_feed_lines,
+            agent_list_lines, agent_panel_lines, self.ui_panels.settings.mode
+        )
     
     def run(self):
         """
