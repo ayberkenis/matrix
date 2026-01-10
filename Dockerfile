@@ -9,4 +9,4 @@ RUN python -m pip install --upgrade pip \
 
 COPY . .
 
-CMD ["python", "-m", "living_matrix"]
+CMD ["python", "-m", "living_matrix", "--port", "1337"]
