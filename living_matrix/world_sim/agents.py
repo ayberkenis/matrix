@@ -4,6 +4,8 @@ import random
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import deque
+from living_matrix.intent import Intent
+from living_matrix.relationships import RelationshipGraph
 
 
 @dataclass
@@ -65,6 +67,15 @@ class Agent:
     work_ethic: float = 0.6  # 0.0-1.0, work preference
     location_success: Dict[str, float] = field(default_factory=dict)  # region_id -> success count
     location_failure: Dict[str, float] = field(default_factory=dict)  # region_id -> failure count
+    
+    # Intent system
+    intent: Intent = field(default_factory=lambda: Intent(
+        survive=0.5,
+        explore=0.3,
+        cooperate=0.4,
+        dominate=0.2,
+        escape=0.1
+    ))
 
 
 class AgentSystem:
@@ -86,6 +97,7 @@ class AgentSystem:
         random.seed(seed)
         self.locations = locations
         self.agents: Dict[str, Agent] = {}
+        self.relationship_graph = RelationshipGraph()  # Weighted social graph
         self._create_agents(num_agents)
         self._create_relationships()
     
@@ -193,17 +205,23 @@ class AgentSystem:
             self._update_needs(agent)
             self._update_mood(agent)
             
-            # Determine action based on schedule and needs
+            # Drift intent over time
+            agent.intent.drift(rate=0.005)
+            
+            # Determine action based on schedule, needs, and intent
             action = self._determine_action(agent, world_map, hour)
             actions.append((agent.id, action))
             
             # Record in memory
             agent.memory.append(action)
         
+        # Drift all relationships
+        self.relationship_graph.drift_all()
+        
         return actions
     
     def _determine_action(self, agent: Agent, world_map, hour: int) -> str:
-        """Determine what action an agent takes this turn."""
+        """Determine what action an agent takes this turn (now weighted by intent)."""
         # If sleeping, stay at home
         if agent.schedule == "sleep" and agent.current_location != agent.home_location:
             agent.current_location = agent.home_location
@@ -213,6 +231,60 @@ class AgentSystem:
         if agent.schedule == "sleep":
             agent.needs.rest = max(0.0, agent.needs.rest - 0.1)
             return f"{agent.name} rests at {world_map.get_location(agent.home_location).name}"
+        
+        # Intent-weighted decision making
+        # High survive intent → prioritize food, safety
+        if agent.intent.survive > 0.7 and agent.needs.food > 0.5:
+            market_locations = [loc for loc in world_map.locations.values() 
+                              if loc.type_tag == 'market']
+            if market_locations:
+                market = random.choice(market_locations)
+                agent.current_location = market.id
+                agent.needs.food = max(0.0, agent.needs.food - 0.3)
+                return f"{agent.name} urgently seeks food at {market.name}"
+        
+        # High explore intent → move to new locations
+        if agent.intent.explore > 0.6 and random.random() < 0.3:
+            transit_locations = [loc for loc in world_map.locations.values() 
+                               if loc.type_tag == 'transit']
+            if transit_locations:
+                loc = random.choice(transit_locations)
+                agent.current_location = loc.id
+                return f"{agent.name} explores {loc.name}"
+        
+        # High cooperate intent → seek social interaction
+        if agent.intent.cooperate > 0.6 and agent.needs.social > 0.5:
+            crowded_locations = world_map.get_hotspots(top_n=5)
+            if crowded_locations:
+                loc, _ = random.choice(crowded_locations)
+                agent.current_location = loc.id
+                agent.needs.social = max(0.0, agent.needs.social - 0.2)
+                # Record cooperation interaction if other agents present
+                agents_at_loc = [a for a in self.agents.values() if a.current_location == loc.id and a.id != agent.id]
+                if agents_at_loc:
+                    other = random.choice(agents_at_loc)
+                    self.relationship_graph.record_interaction(agent.id, other.id, 'cooperation', 0.1)
+                return f"{agent.name} seeks cooperation at {loc.name}"
+        
+        # High dominate intent → may cause conflict
+        if agent.intent.dominate > 0.6 and random.random() < 0.1:
+            agents_at_loc = [a for a in self.agents.values() 
+                           if a.current_location == agent.current_location and a.id != agent.id]
+            if agents_at_loc:
+                other = random.choice(agents_at_loc)
+                # Check relationship - high conflict potential
+                if self.relationship_graph.should_conflict(agent.id, other.id):
+                    self.relationship_graph.record_interaction(agent.id, other.id, 'conflict', 0.2)
+                    return f"{agent.name} conflicts with {other.name}"
+        
+        # High escape intent → try to leave current location
+        if agent.intent.escape > 0.7 and random.random() < 0.2:
+            transit_locations = [loc for loc in world_map.locations.values() 
+                               if loc.type_tag == 'transit']
+            if transit_locations:
+                loc = random.choice(transit_locations)
+                agent.current_location = loc.id
+                return f"{agent.name} attempts to escape to {loc.name}"
         
         # If work time, go to work location (or stay if already there)
         if agent.schedule == "work":

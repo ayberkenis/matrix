@@ -3,6 +3,7 @@
 from fastapi import WebSocket, WebSocketDisconnect
 from typing import Set, Optional
 import json
+import time
 from living_matrix.core.ipc import MatrixStateStore
 
 # Global state store (set by app.py)
@@ -94,9 +95,14 @@ async def websocket_endpoint(websocket: WebSocket):
         async def check_updates():
             """Periodically check for state updates and send them."""
             nonlocal last_turn, last_event_count
+            event_send_interval = 2.0  # Send events every 2 seconds (slower)
+            state_check_interval = 0.5  # Check state every 500ms (keep responsive)
+            last_event_send_time = time.time()
+            
             while True:
                 try:
-                    await asyncio.sleep(0.5)  # Check every 500ms
+                    await asyncio.sleep(state_check_interval)  # Check every 500ms
+                    current_time = time.time()
                     
                     if _state_store is None:
                         continue
@@ -118,20 +124,23 @@ async def websocket_endpoint(websocket: WebSocket):
                                 }
                             }, websocket)
                     
-                    # Check for new events using improved method
-                    new_events = _state_store.get_new_events_since(last_event_count)
-                    if new_events:
-                        # Send each new event individually
-                        for event in new_events:
+                    # Check for new events, but send them at a slower rate
+                    time_since_last_event = current_time - last_event_send_time
+                    if time_since_last_event >= event_send_interval:
+                        new_events = _state_store.get_new_events_since(last_event_count)
+                        if new_events:
+                            # Send only one event at a time to slow down the rate
+                            # Send the first new event
                             try:
                                 await manager.send_personal_message({
                                     "type": "event",
-                                    "payload": event
+                                    "payload": new_events[0]
                                 }, websocket)
+                                last_event_count += 1  # Only increment by 1
+                                last_event_send_time = current_time
                             except Exception:
                                 # Connection closed, break out
                                 return
-                        last_event_count = len(_state_store.get_events())
                 
                 except Exception as e:
                     # Continue on error (connection might be closed)

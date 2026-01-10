@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
+from living_matrix.tension import Tension as MultiTension
+from living_matrix.intent import Intent
 
 
 class EventType(Enum):
@@ -54,12 +56,33 @@ class DistrictPsychology:
 
 @dataclass
 class DistrictTension:
-    """Tension as stored stress energy."""
-    tension: float = 20.0  # 0-100, stored energy
+    """Tension as stored stress energy (now multi-dimensional)."""
+    # Keep old single tension for backward compatibility
+    tension: float = 20.0  # 0-100, stored energy (legacy, use multi_tension instead)
     tension_pressure: float = 0.0  # Accumulating pressure this turn
     tension_release: float = 0.0  # Episodic release
     tension_decay: float = 0.5  # Baseline decay per turn
     last_turn: int = 0  # Track for trend calculation
+    
+    # New multi-dimensional tension
+    multi_tension: MultiTension = field(default_factory=lambda: MultiTension(
+        economic=20.0,
+        social=20.0,
+        political=15.0,
+        existential=10.0
+    ))
+    
+    def get_tension(self) -> float:
+        """Get legacy single tension value (average of multi-dimensional)."""
+        return self.multi_tension.get_average()
+    
+    def set_tension(self, value: float):
+        """Set legacy tension (distributes to all dimensions)."""
+        self.multi_tension.economic = value
+        self.multi_tension.social = value
+        self.multi_tension.political = value * 0.75
+        self.multi_tension.existential = value * 0.5
+        self.tension = value
 
 
 @dataclass
@@ -101,6 +124,15 @@ class AdvancedDistrict:
     
     # Psychology
     psychology: DistrictPsychology = field(default_factory=DistrictPsychology)
+    
+    # Intent (district-level goals)
+    intent: Intent = field(default_factory=lambda: Intent(
+        survive=0.4,
+        explore=0.2,
+        cooperate=0.5,
+        dominate=0.1,
+        escape=0.1
+    ))
     
     # Active events
     active_events: List[WorldEvent] = field(default_factory=list)

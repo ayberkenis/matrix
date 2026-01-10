@@ -75,7 +75,7 @@ class HumanAgentSystem:
         """Create human agents."""
         for i in range(num_agents):
             agent_id = f"human_{i}"
-            name = random.choice(self.NAME_PARTS) + random.choice(self.NAME_PARTS)
+            name = random.choice(self.NAME_PARTS) + " " + random.choice(self.NAME_PARTS)
             district = random.choice(self.districts) if self.districts else "unknown"
             home_location = random.choice(self.locations) if self.locations else "unknown"
             role = random.choice(self.ROLES)

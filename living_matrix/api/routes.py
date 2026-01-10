@@ -56,6 +56,9 @@ def setup_routes():
         if not state:
             raise HTTPException(status_code=503, detail="World not initialized")
         
+        # Record observation (for observation effect)
+        _state_store.record_observation(state.turn)
+        
         response = {
             "turn": state.turn,
             "day": state.day,
@@ -97,6 +100,9 @@ def setup_routes():
         """Get all districts with economy stats."""
         if _state_store is None:
             raise HTTPException(status_code=503, detail="World not initialized")
+        state = _state_store.get_state()
+        if state:
+            _state_store.record_observation(state.turn)
         districts = _state_store.get_districts()
         return {
             "districts": districts,
@@ -144,5 +150,33 @@ def setup_routes():
         command = MatrixCommand(command="set_speed", params={"ms": int(ms)})
         await _command_queue.put(command)
         return {"status": "speed_set", "ms": int(ms)}
+    
+    @router.get("/world/causality")
+    async def get_causality(limit: int = 50):
+        """Get recent causal records."""
+        # Note: This requires access to simulation's causality_system
+        # For now, return placeholder - full implementation would need simulation reference
+        return {
+            "message": "Causality system integrated - records available in simulation",
+            "note": "Full API access requires simulation reference integration"
+        }
+    
+    @router.get("/world/emotions")
+    async def get_emotions():
+        """Get emotional memory summary."""
+        # Note: This requires access to simulation's emotional_memory
+        return {
+            "message": "Emotional memory system integrated",
+            "note": "Full API access requires simulation reference integration"
+        }
+    
+    @router.get("/world/rules")
+    async def get_learned_rules():
+        """Get learned rules."""
+        # Note: This requires access to simulation's learned_rules
+        return {
+            "message": "Learned rules system integrated",
+            "note": "Full API access requires simulation reference integration"
+        }
     
     return router

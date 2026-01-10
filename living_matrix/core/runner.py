@@ -117,6 +117,16 @@ class WorldRunner:
         # Advance simulation
         self.simulation.step(autonomous=True)
         
+        # Apply observation effect if recently observed
+        obs_info = self.state_store.get_observation_info()
+        current_turn = self.simulation.world.state.turn if self.simulation.world.state else 0
+        if obs_info['last_turn'] == current_turn or (current_turn - obs_info['last_turn']) < 5:
+            # Recently observed - temporarily boost expression drive
+            if self.simulation.world.state:
+                # Temporarily increase expression drive
+                original_expression = self.simulation.world.state.drives.expression
+                self.simulation.world.state.drives.expression = min(1.0, original_expression + 0.1)
+        
         # Create state snapshot
         state = self._create_state_snapshot()
         
@@ -165,10 +175,30 @@ class WorldRunner:
                         # Get neighboring districts
                         neighbor_ids = [r_id for r_id in sim.world_map.regions.keys() if r_id != district_id]
                         
+                        # Get multi-dimensional tension
+                        multi_tension = None
+                        if hasattr(district.tension_state, 'multi_tension'):
+                            multi_tension = district.tension_state.multi_tension.to_dict()
+                        else:
+                            # Fallback to single tension
+                            multi_tension = {
+                                'economic': district.tension_state.tension,
+                                'social': district.tension_state.tension,
+                                'political': district.tension_state.tension * 0.75,
+                                'existential': district.tension_state.tension * 0.5
+                            }
+                        
+                        # Get district intent
+                        district_intent = None
+                        if hasattr(district, 'intent'):
+                            district_intent = district.intent.to_dict()
+                        
                         districts.append({
                             "id": district_id,
                             "name": district.district_name,
-                            "tension": round(district.tension_state.tension, 1),
+                            "tension": round(district.tension_state.tension, 1),  # Legacy
+                            "tension_multi": multi_tension,  # New multi-dimensional
+                            "intent": district_intent,  # New intent
                             "tension_trend": world_dynamics.get_tension_trend(district_id),
                             "pressure": {
                                 "food": round(district.pressure.food, 2),
@@ -215,6 +245,16 @@ class WorldRunner:
         agents = []
         if sim.human_agent_system:
             for agent in sim.human_agent_system.agents.values():
+                # Get agent intent
+                agent_intent = None
+                if hasattr(agent, 'intent'):
+                    agent_intent = agent.intent.to_dict()
+                elif hasattr(sim, 'agent_system') and sim.agent_system:
+                    # Try to get from agent_system
+                    world_agent = sim.agent_system.get_agent(agent.id)
+                    if world_agent and hasattr(world_agent, 'intent'):
+                        agent_intent = world_agent.intent.to_dict()
+                
                 agents.append({
                     "id": agent.id,
                     "name": agent.name,
@@ -231,6 +271,7 @@ class WorldRunner:
                     "mood": agent.mood,
                     "goals": agent.goals,
                     "current_action": agent.current_action,
+                    "intent": agent_intent,  # New intent
                     "inventory": {
                         "food": agent.inventory.food,
                         "credits": agent.inventory.credits,

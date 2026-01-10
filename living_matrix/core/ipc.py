@@ -40,6 +40,8 @@ class MatrixStateStore:
         self._event_history: deque = deque(maxlen=200)  # Last 200 events
         self._last_turn: int = 0  # Track last turn for change detection
         self._last_event_ids: set = set()  # Track event IDs to detect new events
+        self._observation_count: int = 0  # Track API observations (for observation effect)
+        self._last_observation_turn: int = 0
     
     def update(self, state: MatrixState):
         """Update the state snapshot (called by runner)."""
@@ -118,6 +120,23 @@ class MatrixStateStore:
             if self._state:
                 return self._state.economy
             return None
+    
+    def record_observation(self, turn: int):
+        """
+        Record that the world was observed (for observation effect).
+        This temporarily increases expression and narrative richness.
+        """
+        with self._lock:
+            self._observation_count += 1
+            self._last_observation_turn = turn
+    
+    def get_observation_info(self) -> Dict[str, Any]:
+        """Get observation tracking info."""
+        with self._lock:
+            return {
+                'count': self._observation_count,
+                'last_turn': self._last_observation_turn
+            }
 
 
 class MatrixCommandQueue:

@@ -56,6 +56,22 @@ class Simulation:
         self.camera = Camera()
         self.ui_panels = UIPanels()
         
+        # Advanced AI systems
+        from living_matrix.causality import CausalitySystem
+        from living_matrix.memory import EmotionalMemory, LearnedRulesSystem
+        from living_matrix.entropy import EntropySystem
+        from living_matrix.world_pressure import WorldPressureSystem
+        
+        self.causality_system = CausalitySystem()
+        self.emotional_memory = EmotionalMemory()
+        self.learned_rules = LearnedRulesSystem()
+        self.entropy_system = EntropySystem(seed=self.world.state.seed if self.world.state else 42)
+        self.world_pressure_system = WorldPressureSystem()
+        
+        # Observation effect tracking
+        self.observation_count = 0
+        self.last_observation_turn = 0
+        
         # Autopilot settings
         self.autopilot = autopilot_enabled
         self.tick_delay_ms = 50  # milliseconds between autonomous ticks (default 50ms)
@@ -1183,6 +1199,135 @@ class Simulation:
             self.world_map, self.agent_system, agent_actions, tensor_modifier
         )
         
+        # ===== INTEGRATE NEW AI SYSTEMS =====
+        turn = self.world.state.turn
+        
+        # 1. Check for entropy/anomalies
+        anomaly = self.entropy_system.check_anomaly(turn)
+        if anomaly:
+            # Apply anomaly effects
+            if self.world_dynamics_system:
+                for district_id in self.world_map.regions.keys():
+                    district = self.world_dynamics_system.get_district(district_id)
+                    if district:
+                        # Apply anomaly effects to tension
+                        if 'social_tension' in anomaly.effects:
+                            district.tension_state.multi_tension.social += anomaly.effects['social_tension']
+                        if 'economic_tension' in anomaly.effects:
+                            district.tension_state.multi_tension.economic += anomaly.effects['economic_tension']
+                        if 'existential_tension' in anomaly.effects:
+                            district.tension_state.multi_tension.existential += anomaly.effects['existential_tension']
+                        district.tension_state.multi_tension.normalize()
+        
+        # 2. Apply world pressure to districts and agents
+        if self.world_dynamics_system and self.weather_system and self.time_system:
+            conditions = self.world_pressure_system.get_conditions_from_world(
+                self.weather_system, self.time_system
+            )
+            
+            for district_id in self.world_map.regions.keys():
+                district = self.world_dynamics_system.get_district(district_id)
+                if district:
+                    # Apply world pressure to district intent and tension
+                    self.world_pressure_system.apply_pressure(
+                        conditions, district.intent, district.tension_state.multi_tension, turn
+                    )
+        
+        # 3. Update agent intents based on events and tension
+        if self.agent_system and self.world_dynamics_system:
+            for agent in self.agent_system.agents.values():
+                # Get district tension if agent is in a district
+                region = self.world_map.get_region_by_location_id(agent.current_location)
+                if region and self.world_dynamics_system:
+                    district = self.world_dynamics_system.get_district(region.id)
+                    if district:
+                        # Apply tension to agent intent
+                        agent.intent.apply_tension(
+                            district.tension_state.multi_tension.economic,
+                            district.tension_state.multi_tension.social,
+                            district.tension_state.multi_tension.political,
+                            district.tension_state.multi_tension.existential
+                        )
+                        
+                        # Apply pressure (food, scarcity, weather)
+                        weather_bad = conditions.weather in ['rain', 'storm', 'extreme_heat', 'extreme_cold']
+                        agent.intent.apply_pressure(
+                            district.pressure.food,
+                            district.pressure.food > 0.7,
+                            weather_bad
+                        )
+        
+        # 4. Record causality for major events
+        if new_events:
+            for event in new_events:
+                # Record cause-effect
+                # Handle event_type - could be Enum or string
+                event_type_str = 'unknown'
+                if hasattr(event, 'event_type'):
+                    if hasattr(event.event_type, 'value'):
+                        # It's an Enum
+                        event_type_str = event.event_type.value
+                    else:
+                        # It's already a string
+                        event_type_str = str(event.event_type)
+                
+                cause = f"event:{event_type_str}"
+                effect = event.description if hasattr(event, 'description') else str(event)
+                self.causality_system.record(
+                    cause=cause,
+                    effect=effect,
+                    source=event.district_id if hasattr(event, 'district_id') else 'world',
+                    confidence=0.5,
+                    duration=event.duration if hasattr(event, 'duration') else 1,
+                    turn=turn
+                )
+                
+                # Add emotional trace
+                event_desc = effect
+                # Determine emotions based on event type
+                event_type_lower = event_type_str.lower()
+                if 'conflict' in event_type_lower or 'riot' in event_type_lower:
+                    self.emotional_memory.add(event_desc, turn, fear=0.3, anger=0.4, sadness=0.2)
+                elif 'aid' in event_type_lower or 'cooperation' in event_type_lower:
+                    self.emotional_memory.add(event_desc, turn, hope=0.4, joy=0.3)
+                elif 'shortage' in event_type_lower or 'scarcity' in event_type_lower:
+                    self.emotional_memory.add(event_desc, turn, fear=0.5, sadness=0.3)
+        
+        # 5. Decay systems
+        self.causality_system.decay_all()
+        self.emotional_memory.decay_all()
+        
+        # 6. Learn rules from patterns (simplified - check if conditions match effects)
+        if self.world_dynamics_system:
+            for district_id in self.world_map.regions.keys():
+                district = self.world_dynamics_system.get_district(district_id)
+                if district:
+                    # Example: learn rule about food scarcity
+                    if district.pressure.food > 0.7 and district.tension_state.multi_tension.social > 50:
+                        condition = f"food_pressure > 0.7"
+                        effect = "social_tension += 0.3"
+                        self.learned_rules.learn_rule(condition, effect, turn)
+        
+        # 7. Cleanup learned rules
+        self.learned_rules.cleanup(turn)
+        
+        # 8. Adjust entropy based on tension (higher tension = more anomalies)
+        if self.world_dynamics_system:
+            total_tension = 0.0
+            count = 0
+            for district_id in self.world_map.regions.keys():
+                district = self.world_dynamics_system.get_district(district_id)
+                if district:
+                    total_tension += district.tension_state.multi_tension.get_average()
+                    count += 1
+            if count > 0:
+                avg_tension = total_tension / count
+                # Higher tension increases entropy rate (up to 3x)
+                tension_factor = 1.0 + (avg_tension / 100.0) * 2.0
+                self.entropy_system.adjust_entropy_rate(tension_factor)
+            else:
+                self.entropy_system.reset_entropy_rate()
+        
         # Advance economy and human agents per district
         # Use world_dynamics_system if available, otherwise fallback to economy_system
         if self.human_agent_system and self.world_map:
@@ -1230,9 +1375,19 @@ class Simulation:
                         
                         # Collect events from active events
                         for event in district.active_events:
+                            # Handle event_type - could be Enum or string
+                            event_type_str = 'unknown'
+                            if hasattr(event, 'event_type'):
+                                if hasattr(event.event_type, 'value'):
+                                    # It's an Enum
+                                    event_type_str = event.event_type.value
+                                else:
+                                    # It's already a string
+                                    event_type_str = str(event.event_type)
+                            
                             all_human_events.append(("world", 
-                                f"{event.event_type.value} in {district.district_name}", 
-                                event.event_type.value))
+                                f"{event_type_str} in {district.district_name}", 
+                                event_type_str))
                     else:
                         district_resources = {"food_stock": 50, "credits_pool": 100, "jobs_available": 5, 
                                             "security_level": 70, "tension": 20, "scarcity": False}
