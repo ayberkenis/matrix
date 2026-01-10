@@ -2,50 +2,38 @@
 
 import random
 from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass, field, asdict
 import logging
+
+from .dataclasses import WorldFlag, FlagTrigger
+from .constants.world_flags_constants import (
+    KORA_FAMINE_FOOD_THRESHOLD, RIFT_UNREST_TENSION_THRESHOLD,
+    LUME_ECONOMIC_COLLAPSE_CREDITS_THRESHOLD, LUME_ECONOMIC_COLLAPSE_JOBS_THRESHOLD,
+    ZEPH_DOMINANCE_FOOD_THRESHOLD, ZEPH_DOMINANCE_TENSION_THRESHOLD,
+    POPULATION_DECLINE_FOOD_THRESHOLD, TRADE_COLLAPSE_CREDITS_THRESHOLD,
+    TRADE_COLLAPSE_DISTRICT_COUNT, KORA_FAMINE_FOOD_NEED_MULTIPLIER,
+    KORA_FAMINE_MIGRATION_RATE, KORA_FAMINE_TENSION_BASE,
+    KORA_FAMINE_REPRODUCTION_REDUCTION, KORA_FAMINE_RELATIONSHIP_DECAY_MULTIPLIER,
+    KORA_FAMINE_CONFLICT_MULTIPLIER, KORA_FAMINE_FOOD_SHORTAGE_MODIFIER,
+    KORA_FAMINE_CONFLICT_MODIFIER, RIFT_UNREST_CONFLICT_PROBABILITY,
+    RIFT_UNREST_COOPERATION_REDUCTION, RIFT_UNREST_TENSION_DECAY_REDUCTION,
+    RIFT_UNREST_TRUST_FORMATION_REDUCTION, RIFT_UNREST_REPRODUCTION_REDUCTION,
+    RIFT_UNREST_RIOT_MODIFIER, RIFT_UNREST_STRIKE_MODIFIER,
+    LUME_COLLAPSE_JOB_AVAILABILITY_MULTIPLIER, LUME_COLLAPSE_TRADE_SUCCESS_REDUCTION,
+    LUME_COLLAPSE_CREDITS_LOSS_RATE, LUME_COLLAPSE_UNEMPLOYMENT_MODIFIER,
+    LUME_COLLAPSE_MIGRATION_MODIFIER, ZEPH_DOMINANCE_RESOURCE_ATTRACTION,
+    ZEPH_DOMINANCE_MIGRATION_INFLOW, ZEPH_DOMINANCE_COOPERATION_BONUS,
+    ZEPH_DOMINANCE_AID_MODIFIER, ZEPH_DOMINANCE_TRADE_SUCCESS_MODIFIER,
+    POPULATION_DECLINE_REPRODUCTION_REDUCTION, POPULATION_DECLINE_MIGRATION_RATE,
+    POPULATION_DECLINE_RELATIONSHIP_DECAY_MULTIPLIER, POPULATION_DECLINE_DEATH_MODIFIER,
+    TRADE_COLLAPSE_TRADE_SUCCESS_REDUCTION, TRADE_COLLAPSE_TENSION_BASE,
+    TRADE_COLLAPSE_TRUST_FORMATION_REDUCTION, TRADE_COLLAPSE_COOPERATION_REDUCTION,
+    TRADE_COLLAPSE_CONFLICT_MODIFIER, TRADE_COLLAPSE_THEFT_MODIFIER
+)
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class WorldFlag:
-    """A permanent world state flag that cannot fully revert."""
-    id: str
-    description: str
-    triggered_at_turn: int
-    irreversible: bool = True
-    effects: Dict = field(default_factory=dict)  # modifiers applied to world, districts, agents
-    
-    def to_dict(self) -> dict:
-        """Serialize to dictionary."""
-        return {
-            "id": self.id,
-            "description": self.description,
-            "triggered_at_turn": self.triggered_at_turn,
-            "irreversible": self.irreversible,
-            "effects": self.effects
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "WorldFlag":
-        """Deserialize from dictionary."""
-        return cls(
-            id=data["id"],
-            description=data["description"],
-            triggered_at_turn=data["triggered_at_turn"],
-            irreversible=data.get("irreversible", True),
-            effects=data.get("effects", {})
-        )
-
-
-@dataclass
-class FlagTrigger:
-    """Definition of a condition that triggers a world flag."""
-    flag_id: str
-    description: str
-    condition: Callable  # Function that returns True when flag should trigger
-    effects: Dict  # Effects to apply when triggered
+# WorldFlag and FlagTrigger are now imported from dataclasses
+# The class definitions are in dataclasses/flag_dataclasses.py
 
 
 class WorldFlagsSystem:
@@ -56,51 +44,84 @@ class WorldFlagsSystem:
         "kora_famine": {
             "description": "Kora region enters permanent famine state",
             "condition": lambda world_state, districts: (
-                any(d.get("food_stock", 50) < 10 for d in districts.values() if "kora" in d.get("id", "").lower())
+                any(d.get("food_stock", 50) < KORA_FAMINE_FOOD_THRESHOLD for d in districts.values() if "kora" in d.get("id", "").lower())
             ),
             "effects": {
-                "agent_food_need_multiplier": 1.5,
-                "migration_rate": 0.3,
-                "tension_base": 20.0,
-                "event_probability_modifier": {"food_shortage": 1.5, "conflict": 1.3}
+                "agent_food_need_multiplier": KORA_FAMINE_FOOD_NEED_MULTIPLIER,
+                "migration_rate": KORA_FAMINE_MIGRATION_RATE,
+                "tension_base": KORA_FAMINE_TENSION_BASE,
+                "reproduction_reduction": KORA_FAMINE_REPRODUCTION_REDUCTION,  # 70% reduction in birth rate
+                "relationship_decay_multiplier": KORA_FAMINE_RELATIONSHIP_DECAY_MULTIPLIER,  # Relationships decay faster
+                "conflict_multiplier": KORA_FAMINE_CONFLICT_MULTIPLIER,  # More conflicts
+                "event_probability_modifier": {"food_shortage": KORA_FAMINE_FOOD_SHORTAGE_MODIFIER, "conflict": KORA_FAMINE_CONFLICT_MODIFIER}
             }
         },
         "rift_unrest": {
             "description": "Rift region enters permanent unrest state",
             "condition": lambda world_state, districts: (
-                any(d.get("tension", 20) > 80 for d in districts.values() if "rift" in d.get("id", "").lower())
+                any(d.get("tension", 20) > RIFT_UNREST_TENSION_THRESHOLD for d in districts.values() if "rift" in d.get("id", "").lower())
             ),
             "effects": {
-                "agent_conflict_probability": 1.4,
-                "cooperation_reduction": 0.2,
-                "tension_decay_reduction": 0.3,
-                "event_probability_modifier": {"riot": 1.5, "strike": 1.3}
+                "agent_conflict_probability": RIFT_UNREST_CONFLICT_PROBABILITY,
+                "cooperation_reduction": RIFT_UNREST_COOPERATION_REDUCTION,
+                "tension_decay_reduction": RIFT_UNREST_TENSION_DECAY_REDUCTION,
+                "trust_formation_reduction": RIFT_UNREST_TRUST_FORMATION_REDUCTION,  # Harder to form trust
+                "reproduction_reduction": RIFT_UNREST_REPRODUCTION_REDUCTION,  # Lower birth rate
+                "event_probability_modifier": {"riot": RIFT_UNREST_RIOT_MODIFIER, "strike": RIFT_UNREST_STRIKE_MODIFIER}
             }
         },
         "lume_economic_collapse": {
             "description": "Lume region enters economic collapse",
             "condition": lambda world_state, districts: (
-                any(d.get("credits_pool", 100) < 20 and d.get("jobs_available", 5) < 2 
+                any(d.get("credits_pool", 100) < LUME_ECONOMIC_COLLAPSE_CREDITS_THRESHOLD and d.get("jobs_available", 5) < LUME_ECONOMIC_COLLAPSE_JOBS_THRESHOLD 
                     for d in districts.values() if "lume" in d.get("id", "").lower())
             ),
             "effects": {
-                "job_availability_multiplier": 0.5,
-                "trade_success_reduction": 0.4,
-                "agent_credits_loss_rate": 1.3,
-                "event_probability_modifier": {"unemployment_spike": 1.6, "migration": 1.4}
+                "job_availability_multiplier": LUME_COLLAPSE_JOB_AVAILABILITY_MULTIPLIER,
+                "trade_success_reduction": LUME_COLLAPSE_TRADE_SUCCESS_REDUCTION,
+                "agent_credits_loss_rate": LUME_COLLAPSE_CREDITS_LOSS_RATE,
+                "event_probability_modifier": {"unemployment_spike": LUME_COLLAPSE_UNEMPLOYMENT_MODIFIER, "migration": LUME_COLLAPSE_MIGRATION_MODIFIER}
             }
         },
         "zeph_dominance": {
             "description": "Zeph region achieves dominance",
             "condition": lambda world_state, districts: (
-                any(d.get("food_stock", 50) > 80 and d.get("tension", 20) < 30 
+                any(d.get("food_stock", 50) > ZEPH_DOMINANCE_FOOD_THRESHOLD and d.get("tension", 20) < ZEPH_DOMINANCE_TENSION_THRESHOLD 
                     for d in districts.values() if "zeph" in d.get("id", "").lower())
             ),
             "effects": {
-                "resource_attraction": 0.2,
-                "migration_inflow": 0.3,
-                "agent_cooperation_bonus": 0.15,
-                "event_probability_modifier": {"aid_distribution": 1.3, "trade_success": 1.2}
+                "resource_attraction": ZEPH_DOMINANCE_RESOURCE_ATTRACTION,
+                "migration_inflow": ZEPH_DOMINANCE_MIGRATION_INFLOW,
+                "agent_cooperation_bonus": ZEPH_DOMINANCE_COOPERATION_BONUS,
+                "event_probability_modifier": {"aid_distribution": ZEPH_DOMINANCE_AID_MODIFIER, "trade_success": ZEPH_DOMINANCE_TRADE_SUCCESS_MODIFIER}
+            }
+        },
+        "population_decline": {
+            "description": "Global population decline",
+            "condition": lambda world_state, districts: (
+                # Trigger if average food stock is very low across all districts
+                len(districts) > 0 and 
+                sum(d.get("food_stock", 50) for d in districts.values()) / len(districts) < POPULATION_DECLINE_FOOD_THRESHOLD
+            ),
+            "effects": {
+                "reproduction_reduction": POPULATION_DECLINE_REPRODUCTION_REDUCTION,
+                "migration_rate": POPULATION_DECLINE_MIGRATION_RATE,
+                "relationship_decay_multiplier": POPULATION_DECLINE_RELATIONSHIP_DECAY_MULTIPLIER,
+                "event_probability_modifier": {"death": POPULATION_DECLINE_DEATH_MODIFIER}
+            }
+        },
+        "trade_collapse": {
+            "description": "Trade system collapses",
+            "condition": lambda world_state, districts: (
+                # Trigger if multiple districts have very low credits
+                sum(1 for d in districts.values() if d.get("credits_pool", 100) < TRADE_COLLAPSE_CREDITS_THRESHOLD) >= TRADE_COLLAPSE_DISTRICT_COUNT
+            ),
+            "effects": {
+                "trade_success_reduction": TRADE_COLLAPSE_TRADE_SUCCESS_REDUCTION,
+                "tension_base": TRADE_COLLAPSE_TENSION_BASE,
+                "trust_formation_reduction": TRADE_COLLAPSE_TRUST_FORMATION_REDUCTION,
+                "cooperation_reduction": TRADE_COLLAPSE_COOPERATION_REDUCTION,
+                "event_probability_modifier": {"conflict": TRADE_COLLAPSE_CONFLICT_MODIFIER, "theft": TRADE_COLLAPSE_THEFT_MODIFIER}
             }
         }
     }

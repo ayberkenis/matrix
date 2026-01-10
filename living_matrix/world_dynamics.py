@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
 from living_matrix.tension import Tension as MultiTension
-from living_matrix.intent import Intent
+from living_matrix.dataclasses import Intent
 from living_matrix.culture import Culture, CultureSystem
 
 
@@ -144,6 +144,15 @@ class AdvancedDistrict:
     
     # Culture
     culture: Culture = field(default_factory=lambda: Culture())
+    
+    # Social enforcement of birth (SYSTEM 13)
+    birth_pressure: float = 0.0  # 0..1 (district-level pressure for reproduction)
+    
+    # POPULATION COMPRESSION: Child pool tracking
+    child_pool: int = 0  # Number of children in compressed pool
+    active_agents: int = 0  # Number of active agents in this district
+    total_population: int = 0  # active_agents + child_pool
+    population_pressure: float = 0.0  # 0..1 (pressure from population size vs resources)
 
 
 class WorldDynamicsSystem:

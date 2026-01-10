@@ -29,7 +29,9 @@ class WorldSimState:
     def save(self, time: TimeSystem, world_map: WorldMap, weather: WeatherSystem,
              agents: AgentSystem, events: EventSystem):
         """
-        Save world simulation state to disk.
+        Save world simulation state to PostgreSQL (fire-and-forget).
+        
+        This method does NOT block. Errors are logged but not propagated.
         
         Args:
             time: TimeSystem instance
@@ -38,11 +40,6 @@ class WorldSimState:
             agents: AgentSystem instance
             events: EventSystem instance
         """
-        # Create backup if main file exists
-        if self.state_file.exists():
-            import shutil
-            shutil.copy(self.state_file, self.backup_file)
-        
         data = {
             "schema_version": 1,
             "time": time.to_dict(),
@@ -52,11 +49,16 @@ class WorldSimState:
             "events": events.to_dict()
         }
         
+        # Write to PostgreSQL asynchronously
         try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            from living_matrix.persistence.snapshot_writer import write_snapshot
+            turn = time.day_index if hasattr(time, 'day_index') else 0
+            write_snapshot(turn, data)
         except Exception as e:
-            print(f"Error saving world state: {e}")
+            # Log error but don't propagate - simulation must continue
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error saving world simulation state: {e}", exc_info=True)
     
     def load(self, seed: int = 42) -> Optional[tuple]:
         """

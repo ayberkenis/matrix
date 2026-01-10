@@ -5,8 +5,11 @@ import json
 import time
 import threading
 import random
+import logging
 from pathlib import Path
 from typing import Optional, Tuple, List
+
+logger = logging.getLogger(__name__)
 
 from .world import World
 from .agents import Coordinator
@@ -23,7 +26,18 @@ from .world_sim import (
 from .world_sim.bulletin import format_world_bulletin
 from .world_sim.consequence import ConsequenceSystem
 from .human_agent import HumanAgentSystem
-from .economy import EconomySystem
+# Import EconomySystem - handle package vs module conflict
+try:
+    from .economy import EconomySystem
+except ImportError:
+    # If economy is a package, import from the file directly
+    import importlib.util
+    from pathlib import Path
+    economy_file = Path(__file__).parent / "economy.py"
+    spec = importlib.util.spec_from_file_location("economy_module", economy_file)
+    economy_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(economy_module)
+    EconomySystem = economy_module.EconomySystem
 from .camera import Camera, CameraMode
 from .ui_panels import UIPanels, UISettings
 
@@ -31,7 +45,7 @@ from .ui_panels import UIPanels, UISettings
 class Simulation:
     """Main simulation controller."""
     
-    def __init__(self, data_dir: str = "data", autopilot_enabled: bool = True):
+    def __init__(self, data_dir: str = "data", autopilot_enabled: bool = True, fresh: bool = False):
         self.world = World(data_dir)
         self.coordinator = Coordinator()
         self.metrics = MetricsTracker()
@@ -39,6 +53,14 @@ class Simulation:
         self.running = True
         self.debug_mode = False
         self._low_diversity_turns = 0  # Track consecutive low diversity turns
+        
+        # Initialize PostgreSQL database
+        try:
+            from .db.migrations import initialize_database
+            initialize_database(fresh=fresh)
+            logger.info("PostgreSQL persistence initialized")
+        except Exception as e:
+            logger.warning(f"PostgreSQL initialization failed: {e}. Simulation will continue without persistence.")
         
         # World simulation components
         self.world_sim_state = WorldSimState(data_dir)
@@ -121,12 +143,15 @@ class Simulation:
             district_ids = list(self.world_map.regions.keys())
             location_ids = list(self.world_map.locations.keys())
             if not self.human_agent_system:
+                # Ensure minimum number of agents
+                num_agents = max(20, random.randint(12, 30))  # At least 20 agents
                 self.human_agent_system = HumanAgentSystem(
                     districts=district_ids,
                     locations=location_ids,
-                    num_agents=random.randint(12, 30),
+                    num_agents=num_agents,
                     seed=self.world.state.seed
                 )
+                logger.info(f"Initialized {len(self.human_agent_system.agents)} human agents")
             if not self.economy_system:
                 self.economy_system = EconomySystem(districts=district_ids, seed=self.world.state.seed)
             if not self.world_dynamics_system:
@@ -152,12 +177,15 @@ class Simulation:
             # Initialize new systems
             district_ids = list(self.world_map.regions.keys())
             location_ids = list(self.world_map.locations.keys())
+            # Ensure minimum number of agents
+            num_agents = max(20, random.randint(12, 30))  # At least 20 agents
             self.human_agent_system = HumanAgentSystem(
                 districts=district_ids,
                 locations=location_ids,
-                num_agents=random.randint(12, 30),
+                num_agents=num_agents,
                 seed=self.world.state.seed
             )
+            logger.info(f"Initialized {len(self.human_agent_system.agents)} human agents")
             self.economy_system = EconomySystem(districts=district_ids, seed=self.world.state.seed)
             
             # Initialize world dynamics system (includes culture system)
@@ -180,6 +208,92 @@ class Simulation:
         
         if not line.startswith("/"):
             return False
+    
+    def _write_metrics(self, turn: int):
+        """
+        Write metrics to PostgreSQL (fire-and-forget).
+        
+        This method does NOT block. Errors are logged but not propagated.
+        
+        Args:
+            turn: Current turn number
+        """
+        try:
+            from .persistence.metrics_writer import write_metrics
+            
+            # Collect metrics
+            metrics = {}
+            
+            # Population metrics
+            if self.human_agent_system:
+                alive_count = len([a for a in self.human_agent_system.agents.values() if a.is_alive])
+                global_child_pool = sum(self.human_agent_system.child_pools.values())
+                global_total_population = alive_count + global_child_pool
+                
+                metrics["active_agents"] = alive_count
+                metrics["child_pool"] = global_child_pool
+                metrics["total_population"] = global_total_population
+            
+            # Economy metrics
+            if self.world_dynamics_system:
+                districts = self.world_dynamics_system.get_all_districts()
+                if districts:
+                    total_food = sum(d.food_stock for d in districts if hasattr(d, 'food_stock'))
+                    total_credits = sum(d.credits_pool for d in districts if hasattr(d, 'credits_pool'))
+                    avg_tension = sum(d.tension_state.tension for d in districts if hasattr(d, 'tension_state')) / len(districts) if districts else 0.0
+                    
+                    metrics["food"] = total_food
+                    metrics["credits"] = total_credits
+                    metrics["tension"] = avg_tension
+            elif self.economy_system:
+                districts = self.economy_system.get_all_districts()
+                if districts:
+                    total_food = sum(d.food_stock for d in districts)
+                    total_credits = sum(d.credits_pool for d in districts)
+                    avg_tension = sum(d.tension for d in districts) / len(districts) if districts else 0.0
+                    
+                    metrics["food"] = total_food
+                    metrics["credits"] = total_credits
+                    metrics["tension"] = avg_tension
+            
+            # Write metrics asynchronously
+            write_metrics(turn, metrics)
+            
+        except Exception as e:
+            # Log error but don't propagate - simulation must continue
+            logger.error(f"Error writing metrics for turn {turn}: {e}", exc_info=True)
+    
+    def _calculate_civilization_phase(self, active_agents: int, child_pool: int, total_population: int,
+                                     population_pressure: float, extinction_risk: float,
+                                     avg_district_pressure: float) -> str:
+        """
+        Calculate civilization phase based on population metrics (POPULATION COMPRESSION).
+        
+        Phases:
+        - survival: Low population, fragile, high extinction risk
+        - growth: High reproduction, expanding population, low pressure
+        - stable: Balanced population, moderate pressure, sustainable
+        - strain: High population pressure, resource scarcity, instability
+        - decline: Population collapse risk, high mortality, low reproduction
+        """
+        # Survival phase: very low population or high extinction risk
+        if active_agents < 20 or extinction_risk > 0.7:
+            return "survival"
+        
+        # Decline phase: population decreasing, high pressure, low reproduction
+        if population_pressure > 0.8 and extinction_risk > 0.5:
+            return "decline"
+        
+        # Strain phase: high population pressure, resource scarcity
+        if avg_district_pressure > 0.7 or (total_population > 5000 and population_pressure > 0.6):
+            return "strain"
+        
+        # Growth phase: expanding population, low pressure, high child pool
+        if child_pool > active_agents * 0.5 and population_pressure < 0.4 and extinction_risk < 0.3:
+            return "growth"
+        
+        # Stable phase: balanced conditions
+        return "stable"
         
         parts = line.split(None, 1)
         cmd = parts[0].lower()
@@ -210,6 +324,9 @@ class Simulation:
         
         elif cmd == "/save":
             self.world.save()
+            # Also write metrics
+            if self.world.state:
+                self._write_metrics(self.world.state.turn)
             print("State saved.")
             return True
         
@@ -1171,8 +1288,9 @@ class Simulation:
            self.agent_system and self.event_system:
             self._world_tick()
         
-        # Auto-save
+        # Auto-save (snapshots and metrics)
         if state.turn % self.auto_save_interval == 0:
+            # Write snapshot to PostgreSQL
             self.world.save()
             # Also save world simulation state
             if self.time_system and self.world_map:
@@ -1180,6 +1298,8 @@ class Simulation:
                     self.time_system, self.world_map, self.weather_system,
                     self.agent_system, self.event_system
                 )
+            # Write metrics to PostgreSQL
+            self._write_metrics(state.turn)
     
     def _world_tick(self):
         """Advance world simulation by one turn with consequences."""
@@ -1439,6 +1559,19 @@ class Simulation:
                             topic, 0.5, turn
                         )
                         agent.beliefs[topic] = belief
+                    elif "died" in event_desc.lower() or "death" in event_desc.lower():
+                        # Remembered violence/death - negative belief (historical memory)
+                        topic = f"{agent.location}_safety"
+                        belief = self.human_agent_system.belief_system.create_belief_from_experience(
+                            topic, -0.3, turn
+                        )
+                        if topic in agent.beliefs:
+                            # Update existing belief
+                            self.human_agent_system.belief_system.update_belief(
+                                agent.beliefs[topic], -0.3, 0.5, "remembered_violence", turn
+                            )
+                        else:
+                            agent.beliefs[topic] = belief
         
         # 12. Apply culture effects to districts
         if self.world_dynamics_system:
@@ -1497,15 +1630,78 @@ class Simulation:
                     
                     # Get district resources from world dynamics
                     district = self.world_dynamics_system.get_district(district_id)
+                    
+                    # Initialize birth_pressure early (before it's used in trauma effects)
+                    birth_pressure = 0.0
+                    
+                    # Calculate survival systems BEFORE applying to district resources
+                    alive_count = len([a for a in self.human_agent_system.agents.values() if a.is_alive])
+                    # SYSTEM C: Death panic mode (population < threshold)
+                    death_panic_threshold = 15
+                    death_panic_mode = alive_count < death_panic_threshold
+                    # SYSTEM D: Update generational trauma
+                    recent_deaths = sum(1 for a in self.human_agent_system.dead_agents.values() 
+                                      if a.death_turn and (self.world.state.turn - a.death_turn) <= 50)
+                    self.world.state.deaths_last_50_turns = recent_deaths
+                    trauma_increase = recent_deaths * 0.02
+                    self.world.state.generational_trauma = min(1.0, 
+                        self.world.state.generational_trauma * 0.99 + trauma_increase)
+                    
                     if district:
+                        # SYSTEM B: Apply future resource bonus from children
+                        # Count mature children (age >= 100) and child clusters (3+ children together)
+                        mature_children_bonus = 0.0
+                        child_cluster_bonus = 0.0
+                        if self.human_agent_system:
+                            mature_children = [a for a in self.human_agent_system.agents.values() 
+                                             if a.is_alive and a.age >= 100 and len(a.parents_ids) > 0]
+                            mature_children_bonus = sum(a.future_resource_bonus for a in mature_children) * 0.1
+                            
+                            # Check for child clusters (3+ children at same location)
+                            children_by_location = {}
+                            for a in self.human_agent_system.agents.values():
+                                if a.is_alive and a.age < 200 and len(a.parents_ids) > 0:
+                                    if a.location not in children_by_location:
+                                        children_by_location[a.location] = []
+                                    children_by_location[a.location].append(a)
+                            
+                            for loc, children in children_by_location.items():
+                                if len(children) >= 3:
+                                    cluster_bonus = sum(c.future_resource_bonus for c in children) * 0.15
+                                    child_cluster_bonus += cluster_bonus
+                        
+                        # Apply bonuses to food efficiency and tension reduction
+                        food_efficiency_bonus = mature_children_bonus + child_cluster_bonus
+                        tension_reduction = (mature_children_bonus + child_cluster_bonus) * 5.0
+                        
                         district_resources = {
-                            "food_stock": district.food_stock,
+                            "food_stock": district.food_stock * (1.0 + food_efficiency_bonus),  # SYSTEM B: Children create resources
                             "credits_pool": district.credits_pool,
                             "jobs_available": district.jobs_available,
                             "security_level": district.security_level,
-                            "tension": district.tension_state.tension,
+                            "tension": max(0, district.tension_state.tension - tension_reduction),  # SYSTEM B: Lower tension
                             "scarcity": district.pressure.food > 0.7  # Derived from pressure
                         }
+                        
+                        # SYSTEM C: Death panic mode - auto-resolve conflicts, share food, reduce tension
+                        if death_panic_mode:
+                            # Auto-resolve conflicts (reduce tension aggressively)
+                            district.tension_state.tension = max(0, district.tension_state.tension * 0.7)
+                            # Share food automatically (increase food stock)
+                            district.food_stock = min(100, district.food_stock * 1.2)
+                            # Force migration toward fertile zones (handled in agent movement)
+                            district_resources["tension"] = max(0, district_resources["tension"] - 20)
+                            district_resources["food_stock"] = min(100, district_resources["food_stock"] * 1.15)
+                        
+                        # SYSTEM D: Generational trauma effects
+                        # Initialize birth_pressure early (before it's used)
+                        birth_pressure = 0.0
+                        if self.world.state.generational_trauma > 0.3:
+                            # Trauma reduces conflict, increases cooperation
+                            trauma_reduction = self.world.state.generational_trauma * 15.0
+                            district_resources["tension"] = max(0, district_resources["tension"] - trauma_reduction)
+                            # Increase reproduction urgency
+                            birth_pressure += self.world.state.generational_trauma * 0.2
                         
                         # Collect events from active events
                         for event in district.active_events:
@@ -1534,10 +1730,109 @@ class Simulation:
                         district_resources = {"food_stock": 50, "credits_pool": 100, "jobs_available": 5, 
                                             "security_level": 70, "tension": 20, "scarcity": False}
                 
+                # POPULATION COMPRESSION: Calculate total population (active + children)
+                child_pool = self.human_agent_system.child_pools.get(district_id, 0)
+                district_active_agents = len([a for a in self.human_agent_system.agents.values() 
+                                             if a.is_alive and a.district == district_id])
+                total_district_population = district_active_agents + child_pool
+                
+                # Update district with population metrics
+                if district:
+                    district.child_pool = child_pool
+                    district.active_agents = district_active_agents
+                    district.total_population = total_district_population
+                
+                # POPULATION COMPRESSION: Calculate district-level population pressure
+                # Pressure increases when:
+                # - child_pool is high relative to resources
+                # - food per capita is low
+                # - jobs are scarce relative to population
+                district_population_pressure = 0.0
+                if district:
+                    # Food pressure: low food per capita
+                    food_per_capita = district.food_stock / max(1, total_district_population)
+                    food_pressure = max(0.0, min(1.0, 1.0 - (food_per_capita / 5.0)))  # 5 food per capita is ideal
+                    
+                    # Job pressure: jobs per capita
+                    jobs_per_capita = district.jobs_available / max(1, district_active_agents)
+                    job_pressure = max(0.0, min(1.0, 1.0 - (jobs_per_capita / 0.5)))  # 0.5 jobs per agent is ideal
+                    
+                    # Child pool pressure: too many children relative to adults
+                    if district_active_agents > 0:
+                        child_to_adult_ratio = child_pool / district_active_agents
+                        child_pressure = max(0.0, min(1.0, (child_to_adult_ratio - 0.5) / 2.0))  # >0.5 ratio = pressure
+                    else:
+                        child_pressure = 0.0
+                    
+                    # Combined population pressure
+                    district_population_pressure = (food_pressure * 0.4 + job_pressure * 0.3 + child_pressure * 0.3)
+                    district.population_pressure = district_population_pressure
+                    
+                    # Population pressure affects tension
+                    district.tension_state.tension = min(100, district.tension_state.tension + district_population_pressure * 2.0)
+                
+                # SYSTEM 11: Calculate global population pressure and extinction risk
+                alive_count = len([a for a in self.human_agent_system.agents.values() if a.is_alive])
+                global_child_pool = sum(self.human_agent_system.child_pools.values())
+                global_total_population = alive_count + global_child_pool
+                
+                safe_threshold = 30  # Minimum safe population
+                population_pressure = max(0.0, min(1.0, 1.0 - (alive_count / safe_threshold)))
+                
+                # Extinction risk: increases if population is very low or no births for many turns
+                extinction_risk = 0.0
+                if alive_count < 10:
+                    extinction_risk = 1.0 - (alive_count / 10.0)
+                elif self.world.state.turns_since_last_birth > 50:
+                    extinction_risk = min(0.9, self.world.state.turns_since_last_birth / 100.0)
+                
+                # Update global population metrics
+                self.world.state.active_agents = alive_count
+                self.world.state.total_child_pool = global_child_pool
+                self.world.state.total_population = global_total_population
+                
+                # POPULATION COMPRESSION: Calculate civilization phase
+                self.world.state.civilization_phase = self._calculate_civilization_phase(
+                    alive_count, global_child_pool, global_total_population,
+                    population_pressure, extinction_risk, district_population_pressure if district else 0.0
+                )
+                
+                # SYSTEM C: Death panic mode (population < threshold)
+                death_panic_threshold = 15
+                death_panic_mode = alive_count < death_panic_threshold
+                
+                # SYSTEM D: Update generational trauma
+                # Track deaths in last 50 turns
+                recent_deaths = sum(1 for a in self.human_agent_system.dead_agents.values() 
+                                  if a.death_turn and (self.world.state.turn - a.death_turn) <= 50)
+                self.world.state.deaths_last_50_turns = recent_deaths
+                # Trauma accumulates: each death adds 0.02, decays slowly
+                trauma_increase = recent_deaths * 0.02
+                self.world.state.generational_trauma = min(1.0, 
+                    self.world.state.generational_trauma * 0.99 + trauma_increase)
+                
+                # SYSTEM E: Population floor - suspend non-age deaths when population <= 2
+                population_floor_active = alive_count <= 2
+                
+                # Update world state
+                self.world.state.population_pressure = population_pressure
+                self.world.state.extinction_risk = extinction_risk
+                
+                # SYSTEM 13: Calculate district birth pressure
+                birth_pressure = 0.0
+                if district:
+                    # Birth pressure increases with population pressure and low population
+                    birth_pressure = population_pressure * 0.7 + (1.0 - (alive_count / 50.0)) * 0.3
+                    district.birth_pressure = birth_pressure
+                
                 # Advance human agents
                 location_ids = [loc.id for loc in region.locations]
+                # Link world_flags_system to human_agent_system for reproduction effects
+                if hasattr(self, 'world_flags_system'):
+                    self.human_agent_system._world_flags_system = self.world_flags_system
                 human_events = self.human_agent_system.advance(
-                    district_resources, location_ids, self.world_map, self.world.state.turn
+                    district_resources, location_ids, self.world_map, self.world.state.turn,
+                    extinction_risk, population_pressure, birth_pressure
                 )
                 all_human_events.extend(human_events)
                 
@@ -1553,6 +1848,17 @@ class Simulation:
             
             # Store human events for UI rendering
             self._last_human_events = all_human_events
+            
+            # SYSTEM 15: Check for extinction
+            alive_count = len([a for a in self.human_agent_system.agents.values() if a.is_alive])
+            if alive_count == 0 and self.world.state.world_state == "alive":
+                # Extinction occurred
+                self.world.state.world_state = "dead_world"
+                logger.warning("EXTINCTION: Population reached zero. World enters dead_world state.")
+                # Save final snapshot
+                self.world.save()
+                # Write final metrics
+                self._write_metrics(self.world.state.turn)
     
     def _advance_agents_with_consequences(self, hour: int) -> List[Tuple[str, str]]:
         """Advance agents with consequence-driven decision making."""
@@ -1830,4 +2136,7 @@ class Simulation:
                     self.time_system, self.world_map, self.weather_system,
                     self.agent_system, self.event_system
                 )
+            # Write final metrics
+            if self.world.state:
+                self._write_metrics(self.world.state.turn)
             print("State saved. Goodbye.")

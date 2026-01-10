@@ -2,41 +2,26 @@
 
 import random
 from typing import Dict, List, Optional
-from dataclasses import dataclass, field, asdict
 import logging
+
+from .dataclasses import Belief
+from .constants.beliefs_constants import (
+    DEFAULT_BELIEF_DECAY_RATE, DEFAULT_BELIEF_SPREAD_PROBABILITY,
+    RUMOR_CONFIDENCE_MIN, RUMOR_CONFIDENCE_MAX,
+    EVENT_CONFIDENCE_MIN, EVENT_CONFIDENCE_MAX,
+    INTERACTION_CONFIDENCE_MIN, INTERACTION_CONFIDENCE_MAX,
+    EXPERIENCE_CONFIDENCE_MIN, EXPERIENCE_CONFIDENCE_MAX,
+    SPREAD_CONFIDENCE_MULTIPLIER, MERGE_CONFIDENCE_DECAY,
+    SAFETY_BELIEF_WEIGHT, FOOD_BELIEF_WEIGHT,
+    CONFLICT_LIKELIHOOD_MULTIPLIER, CONFLICT_LIKELIHOOD_BASE,
+    COOPERATION_LIKELIHOOD_MULTIPLIER, COOPERATION_LIKELIHOOD_BASE,
+    COOPERATION_LIKELIHOOD_REDUCTION
+)
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class Belief:
-    """A belief held by an agent about a topic."""
-    topic: str  # e.g., "kora_food_availability", "rift_safety", "zeph_trustworthiness"
-    polarity: float  # -1.0 (hostile) to +1.0 (favorable)
-    confidence: float  # 0.0 to 1.0
-    source: str  # "rumor", "event", "agent_interaction", "direct_experience"
-    last_updated_turn: int
-    
-    def to_dict(self) -> dict:
-        """Serialize to dictionary."""
-        return {
-            "topic": self.topic,
-            "polarity": self.polarity,
-            "confidence": self.confidence,
-            "source": self.source,
-            "last_updated_turn": self.last_updated_turn
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "Belief":
-        """Deserialize from dictionary."""
-        return cls(
-            topic=data["topic"],
-            polarity=data["polarity"],
-            confidence=data["confidence"],
-            source=data["source"],
-            last_updated_turn=data["last_updated_turn"]
-        )
+# Belief is now imported from dataclasses
+# The class definition is in dataclasses/belief_dataclasses.py
 
 
 class BeliefSystem:
@@ -46,15 +31,15 @@ class BeliefSystem:
         """Initialize belief system."""
         self.seed = seed
         random.seed(seed)
-        self.belief_decay_rate = 0.01  # Confidence decays by this per turn
-        self.belief_spread_probability = 0.15  # Probability of spreading belief during interaction
+        self.belief_decay_rate = DEFAULT_BELIEF_DECAY_RATE  # Confidence decays by this per turn
+        self.belief_spread_probability = DEFAULT_BELIEF_SPREAD_PROBABILITY  # Probability of spreading belief during interaction
     
     def create_belief_from_rumor(self, topic: str, polarity: float, turn: int) -> Belief:
         """Create a belief from a rumor (lower confidence)."""
         return Belief(
             topic=topic,
             polarity=polarity,
-            confidence=random.uniform(0.3, 0.6),  # Rumors have lower confidence
+            confidence=random.uniform(RUMOR_CONFIDENCE_MIN, RUMOR_CONFIDENCE_MAX),  # Rumors have lower confidence
             source="rumor",
             last_updated_turn=turn
         )
@@ -64,7 +49,7 @@ class BeliefSystem:
         return Belief(
             topic=topic,
             polarity=polarity,
-            confidence=random.uniform(0.6, 0.9),  # Events have higher confidence
+            confidence=random.uniform(EVENT_CONFIDENCE_MIN, EVENT_CONFIDENCE_MAX),  # Events have higher confidence
             source="event",
             last_updated_turn=turn
         )
@@ -74,7 +59,7 @@ class BeliefSystem:
         return Belief(
             topic=topic,
             polarity=polarity,
-            confidence=random.uniform(0.4, 0.7),
+            confidence=random.uniform(INTERACTION_CONFIDENCE_MIN, INTERACTION_CONFIDENCE_MAX),
             source="agent_interaction",
             last_updated_turn=turn
         )
@@ -84,7 +69,7 @@ class BeliefSystem:
         return Belief(
             topic=topic,
             polarity=polarity,
-            confidence=random.uniform(0.7, 1.0),  # Direct experience is most confident
+            confidence=random.uniform(EXPERIENCE_CONFIDENCE_MIN, EXPERIENCE_CONFIDENCE_MAX),  # Direct experience is most confident
             source="direct_experience",
             last_updated_turn=turn
         )
@@ -105,7 +90,7 @@ class BeliefSystem:
         total_confidence = belief.confidence + new_confidence
         if total_confidence > 0:
             belief.polarity = (belief.polarity * belief.confidence + new_polarity * new_confidence) / total_confidence
-            belief.confidence = min(1.0, total_confidence * 0.9)  # Slight decay on merge
+            belief.confidence = min(1.0, total_confidence * MERGE_CONFIDENCE_DECAY)  # Slight decay on merge
         else:
             belief.polarity = new_polarity
             belief.confidence = new_confidence
@@ -149,7 +134,7 @@ class BeliefSystem:
             self.update_belief(
                 target_beliefs[topic],
                 source_belief.polarity,
-                source_belief.confidence * 0.7,  # Spread beliefs have reduced confidence
+                source_belief.confidence * SPREAD_CONFIDENCE_MULTIPLIER,  # Spread beliefs have reduced confidence
                 "agent_interaction",
                 turn
             )
@@ -158,7 +143,7 @@ class BeliefSystem:
             target_beliefs[topic] = Belief(
                 topic=topic,
                 polarity=source_belief.polarity,
-                confidence=source_belief.confidence * 0.7,  # Reduced confidence when spread
+                confidence=source_belief.confidence * SPREAD_CONFIDENCE_MULTIPLIER,  # Reduced confidence when spread
                 source="agent_interaction",
                 last_updated_turn=turn
             )
@@ -207,7 +192,7 @@ class BeliefSystem:
         food_belief = self.get_belief_influence(beliefs, topic)
         
         # Combined bias (weighted)
-        return (safety_belief * 0.6 + food_belief * 0.4)
+        return (safety_belief * SAFETY_BELIEF_WEIGHT + food_belief * FOOD_BELIEF_WEIGHT)
     
     def get_conflict_likelihood_modifier(self, beliefs: Dict[str, Belief], other_agent_id: str) -> float:
         """
@@ -225,9 +210,9 @@ class BeliefSystem:
         
         # Negative trust (hostile) increases conflict likelihood
         if trust_belief < 0:
-            return 1.0 + abs(trust_belief) * 0.5  # Up to 1.5x conflict
+            return CONFLICT_LIKELIHOOD_BASE + abs(trust_belief) * CONFLICT_LIKELIHOOD_MULTIPLIER  # Up to 1.5x conflict
         else:
-            return 1.0 - trust_belief * 0.3  # Down to 0.7x conflict (less likely)
+            return CONFLICT_LIKELIHOOD_BASE - trust_belief * COOPERATION_LIKELIHOOD_REDUCTION  # Down to 0.7x conflict (less likely)
     
     def get_cooperation_likelihood_modifier(self, beliefs: Dict[str, Belief], other_agent_id: str) -> float:
         """
@@ -245,6 +230,6 @@ class BeliefSystem:
         
         # Positive trust increases cooperation
         if trust_belief > 0:
-            return 1.0 + trust_belief * 0.5  # Up to 1.5x cooperation
+            return COOPERATION_LIKELIHOOD_BASE + trust_belief * COOPERATION_LIKELIHOOD_MULTIPLIER  # Up to 1.5x cooperation
         else:
-            return 1.0 - abs(trust_belief) * 0.3  # Down to 0.7x cooperation
+            return COOPERATION_LIKELIHOOD_BASE - abs(trust_belief) * COOPERATION_LIKELIHOOD_REDUCTION  # Down to 0.7x cooperation

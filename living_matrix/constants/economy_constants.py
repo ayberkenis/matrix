@@ -1,0 +1,18 @@
+"""Economy system constants."""
+
+# District resource defaults
+DEFAULT_FOOD_STOCK = 50.0
+DEFAULT_CREDITS_POOL = 100.0
+DEFAULT_JOBS_AVAILABLE = 5
+DEFAULT_SECURITY_LEVEL = 70.0
+
+# Production defaults
+DEFAULT_PRODUCTION_RATE = 1.0
+DEFAULT_WORKPLACE_COUNT = 2
+
+# Ideal levels
+IDEAL_FOOD = 50.0
+IDEAL_JOBS = 8
+
+# Tension normalization
+TENSION_NORMALIZATION_DIVISOR = 100.0

@@ -4,7 +4,7 @@ import random
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import deque
-from living_matrix.intent import Intent
+from living_matrix.dataclasses import Intent
 from living_matrix.relationships import RelationshipGraph
 
 

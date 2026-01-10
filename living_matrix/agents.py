@@ -6,8 +6,27 @@ from dataclasses import dataclass
 
 from .grammar import generate_from_graph, remix_phrase, apply_grammar_template, GRAMMAR_TEMPLATES, tokenize
 from .memory import SemanticGraph, EpisodicMemory
-from .world import Drives
+from .dataclasses import Drives
 from .tensor_core import TensorCognition
+from .constants.agents_constants import (
+    MIN_TOKEN_LENGTH, DEFAULT_TOKEN_LENGTH, TOKEN_LENGTH_MULTIPLIER, MAX_TOKEN_LENGTH,
+    ARCHIVIST_RECENT_EPISODES, ARCHIVIST_MUTATION_RATE_BASE, ARCHIVIST_MUTATION_RATE_MULTIPLIER,
+    ARCHIVIST_CONFIDENCE_BASE, ARCHIVIST_CONFIDENCE_STABILITY_MULTIPLIER,
+    WEAVER_FALLBACK_RECENT_EPISODES, WEAVER_FALLBACK_MAX_TOKENS, WEAVER_FALLBACK_CONFIDENCE,
+    WEAVER_COHESION_THRESHOLD, WEAVER_TEMPERATURE_BASE, WEAVER_TEMPERATURE_COHESION_MULTIPLIER,
+    WEAVER_CONFIDENCE_BASE, WEAVER_CONFIDENCE_COHESION_MULTIPLIER, WEAVER_TEMPLATE_CHANCE,
+    GARDENER_CLUSTER_DEPTH, GARDENER_CLUSTER_TOP_K, GARDENER_MIN_CLUSTER_SIZE,
+    GARDENER_MAX_TOKENS, GARDENER_TEMPLATE_CHANCE, GARDENER_MIN_TOKENS_FOR_TEMPLATE,
+    GARDENER_FALLBACK_RECENT_EPISODES, GARDENER_FALLBACK_TOKENS_PER_EPISODE,
+    GARDENER_FALLBACK_MIN_TOKENS, GARDENER_TEMPLATE_CHANCE_FALLBACK,
+    GARDENER_CONFIDENCE_BASE, GARDENER_CONFIDENCE_COHESION_MULTIPLIER,
+    TRICKSTER_LENGTH_BASE, TRICKSTER_LENGTH_MULTIPLIER, TRICKSTER_TEMPERATURE,
+    TRICKSTER_RANDOM_WORD_CHANCE, TRICKSTER_CONFIDENCE_BASE, TRICKSTER_CONFIDENCE_NOVELTY_MULTIPLIER,
+    CARTOGRAPHER_NEIGHBOR_COUNT, CARTOGRAPHER_RECENT_EPISODES, CARTOGRAPHER_TOKENS_PER_EPISODE,
+    CARTOGRAPHER_MIN_TOKENS, CARTOGRAPHER_MAX_TOKENS, CARTOGRAPHER_CONFIDENCE_BASE,
+    CARTOGRAPHER_CONFIDENCE_COHESION_MULTIPLIER, CARTOGRAPHER_FALLBACK_SAMPLE_SIZE,
+    COORDINATOR_DRIVE_ALIGNMENT_BASE, COORDINATOR_DRIVE_ALIGNMENT_MULTIPLIER
+)
 
 
 @dataclass
@@ -59,7 +78,7 @@ class Archivist(Agent):
         turn: int,
         tensor_cognition: Optional[TensorCognition] = None
     ) -> Proposal:
-        recent = memory.get_recent(20)
+        recent = memory.get_recent(ARCHIVIST_RECENT_EPISODES)
         if not recent:
             return Proposal("", [], self.style, self.name, 0.0)
         
@@ -71,11 +90,11 @@ class Archivist(Agent):
             return Proposal("", [], self.style, self.name, 0.0)
         
         # Remix with mutation rate based on novelty drive
-        mutation_rate = 0.1 + 0.2 * drives.novelty
+        mutation_rate = ARCHIVIST_MUTATION_RATE_BASE + ARCHIVIST_MUTATION_RATE_MULTIPLIER * drives.novelty
         remixed = remix_phrase(phrase, graph.edges, mutation_rate)
         
         tokens = tokenize(remixed)
-        confidence = 0.7 + 0.2 * drives.stability
+        confidence = ARCHIVIST_CONFIDENCE_BASE + ARCHIVIST_CONFIDENCE_STABILITY_MULTIPLIER * drives.stability
         
         return Proposal(
             text=remixed,
@@ -102,24 +121,24 @@ class Weaver(Agent):
     ) -> Proposal:
         # Fallback if no graph: use episodic memory
         if not graph.nodes:
-            recent = memory.get_recent(5)
+            recent = memory.get_recent(WEAVER_FALLBACK_RECENT_EPISODES)
             if recent:
                 episode = random.choice(recent)
                 phrase = episode.system_output or episode.user_input
                 if phrase:
                     tokens = tokenize(phrase)
                     if tokens:
-                        text = " ".join(tokens[:min(8, len(tokens))])
-                        return Proposal(text, tokens[:min(12, len(tokens))], self.style, self.name, 0.4)
+                        text = " ".join(tokens[:min(WEAVER_FALLBACK_MAX_TOKENS, len(tokens))])
+                        return Proposal(text, tokens[:min(MAX_TOKEN_LENGTH, len(tokens))], self.style, self.name, WEAVER_FALLBACK_CONFIDENCE)
             return Proposal("", [], self.style, self.name, 0.0)
         
         # Length based on expression drive (minimum 4 tokens)
-        length = max(4, 5 + int(10 * drives.expression))
-        temperature = 1.5 - 0.5 * drives.cohesion  # Lower temp = more cohesive
+        length = max(MIN_TOKEN_LENGTH, DEFAULT_TOKEN_LENGTH + int(TOKEN_LENGTH_MULTIPLIER * drives.expression))
+        temperature = WEAVER_TEMPERATURE_BASE - WEAVER_TEMPERATURE_COHESION_MULTIPLIER * drives.cohesion  # Lower temp = more cohesive
         
         # Start from a high-weight node if cohesion is high
         start_token = None
-        if drives.cohesion > 0.6 and graph.nodes:
+        if drives.cohesion > WEAVER_COHESION_THRESHOLD and graph.nodes:
             sorted_nodes = sorted(graph.nodes.items(), key=lambda x: x[1], reverse=True)
             if sorted_nodes:
                 start_token = sorted_nodes[0][0]
@@ -155,23 +174,23 @@ class Weaver(Agent):
                 node_list = list(graph.nodes.keys())
                 tokens = random.sample(node_list, min(length, len(node_list)))
                 # Repeat to reach minimum length
-                while len(tokens) < 4 and node_list:
+                while len(tokens) < MIN_TOKEN_LENGTH and node_list:
                     tokens.append(random.choice(node_list))
         
         if not tokens:
             return Proposal("", [], self.style, self.name, 0.0)
         
         # Ensure minimum length
-        tokens = tokens[:min(12, max(4, len(tokens)))]
+        tokens = tokens[:min(MAX_TOKEN_LENGTH, max(MIN_TOKEN_LENGTH, len(tokens)))]
         
         # Apply template sometimes
-        if len(tokens) >= 3 and random.random() < 0.5 and GRAMMAR_TEMPLATES:
+        if len(tokens) >= 3 and random.random() < WEAVER_TEMPLATE_CHANCE and GRAMMAR_TEMPLATES:
             template = random.choice(GRAMMAR_TEMPLATES)
             text = apply_grammar_template(tokens, template)
         else:
             text = " ".join(tokens)
         
-        confidence = 0.6 + 0.3 * drives.cohesion
+        confidence = WEAVER_CONFIDENCE_BASE + WEAVER_CONFIDENCE_COHESION_MULTIPLIER * drives.cohesion
         
         return Proposal(
             text=text,
@@ -201,14 +220,14 @@ class Gardener(Agent):
         
         # Pick a central token
         central = random.choice(list(graph.nodes.keys()))
-        cluster = graph.get_cluster(central, depth=2, top_k=10)
+        cluster = graph.get_cluster(central, depth=GARDENER_CLUSTER_DEPTH, top_k=GARDENER_CLUSTER_TOP_K)
         
         # Always produce multi-token output (never "stands alone")
-        if cluster and len(cluster) >= 2:
+        if cluster and len(cluster) >= GARDENER_MIN_CLUSTER_SIZE:
             # Use cluster tokens
-            tokens = [central] + cluster[:min(8, len(cluster))]
+            tokens = [central] + cluster[:min(GARDENER_MAX_TOKENS, len(cluster))]
             # Apply template or create descriptive phrase
-            if random.random() < 0.5 and len(tokens) >= 3:
+            if random.random() < GARDENER_TEMPLATE_CHANCE and len(tokens) >= GARDENER_MIN_TOKENS_FOR_TEMPLATE:
                 template = random.choice([
                     "{0} connects {1} {2}",
                     "{0} links {1} through {2}",
@@ -219,32 +238,32 @@ class Gardener(Agent):
                 text = " ".join(tokens[:min(6, len(tokens))])
         else:
             # Fallback: use recent episodic tokens or generate walk
-            if graph.edges:
-                # Generate a walk from central token
-                tokens = generate_from_graph(graph.edges, central, length=random.randint(4, 8), temperature=1.5)
-                if not tokens:
+                if graph.edges:
+                    # Generate a walk from central token
+                    tokens = generate_from_graph(graph.edges, central, length=random.randint(GARDENER_FALLBACK_MIN_TOKENS, GARDENER_MAX_TOKENS), temperature=1.5)
+                    if not tokens:
+                        tokens = [central]
+                else:
                     tokens = [central]
-            else:
-                tokens = [central]
-            
-            # Get additional tokens from recent memory
-            recent = memory.get_recent(5)
-            for ep in recent:
-                ep_tokens = tokenize(ep.system_output + " " + ep.user_input)
-                tokens.extend(ep_tokens[:2])
-                if len(tokens) >= 4:
-                    break
-            
-            tokens = tokens[:min(8, len(tokens))]
-            
-            # Apply template
-            if len(tokens) >= 3 and random.random() < 0.6:
-                template = random.choice(GRAMMAR_TEMPLATES)
-                text = apply_grammar_template(tokens, template)
-            else:
-                text = " ".join(tokens)
+                
+                # Get additional tokens from recent memory
+                recent = memory.get_recent(GARDENER_FALLBACK_RECENT_EPISODES)
+                for ep in recent:
+                    ep_tokens = tokenize(ep.system_output + " " + ep.user_input)
+                    tokens.extend(ep_tokens[:GARDENER_FALLBACK_TOKENS_PER_EPISODE])
+                    if len(tokens) >= GARDENER_FALLBACK_MIN_TOKENS:
+                        break
+                
+                tokens = tokens[:min(GARDENER_MAX_TOKENS, len(tokens))]
+                
+                # Apply template
+                if len(tokens) >= GARDENER_MIN_TOKENS_FOR_TEMPLATE and random.random() < GARDENER_TEMPLATE_CHANCE_FALLBACK:
+                    template = random.choice(GRAMMAR_TEMPLATES)
+                    text = apply_grammar_template(tokens, template)
+                else:
+                    text = " ".join(tokens)
         
-        confidence = 0.5 + 0.4 * drives.cohesion
+        confidence = GARDENER_CONFIDENCE_BASE + GARDENER_CONFIDENCE_COHESION_MULTIPLIER * drives.cohesion
         
         return Proposal(
             text=text,
@@ -270,11 +289,11 @@ class Trickster(Agent):
         tensor_cognition: Optional[TensorCognition] = None
     ) -> Proposal:
         # Minimum length 4 tokens
-        length = max(4, 3 + int(5 * drives.novelty))
+        length = max(MIN_TOKEN_LENGTH, TRICKSTER_LENGTH_BASE + int(TRICKSTER_LENGTH_MULTIPLIER * drives.novelty))
         
         if graph.edges:
             # High temperature walk
-            tokens = generate_from_graph(graph.edges, None, length, temperature=2.5)
+            tokens = generate_from_graph(graph.edges, None, length, temperature=TRICKSTER_TEMPERATURE)
         else:
             tokens = []
         
@@ -283,19 +302,19 @@ class Trickster(Agent):
             if graph.nodes:
                 node_list = list(graph.nodes.keys())
                 tokens = random.sample(node_list, min(length, len(node_list)))
-                while len(tokens) < 4 and node_list:
+                while len(tokens) < MIN_TOKEN_LENGTH and node_list:
                     tokens.append(random.choice(node_list))
             else:
                 return Proposal("", [], self.style, self.name, 0.0)
         
         # Sometimes add random words
-        if random.random() < 0.3:
+        if random.random() < TRICKSTER_RANDOM_WORD_CHANCE:
             tokens.append("shift")
             tokens.append("flux")
         
-        tokens = tokens[:min(12, len(tokens))]
+        tokens = tokens[:min(MAX_TOKEN_LENGTH, len(tokens))]
         text = " ".join(tokens)
-        confidence = 0.3 + 0.4 * drives.novelty
+        confidence = TRICKSTER_CONFIDENCE_BASE + TRICKSTER_CONFIDENCE_NOVELTY_MULTIPLIER * drives.novelty
         
         return Proposal(
             text=text,
@@ -333,22 +352,22 @@ class Cartographer(Agent):
             
             # Expand with neighbors or recent memory
             if token1 in graph.edges:
-                neighbors = list(graph.edges[token1].keys())[:3]
+                neighbors = list(graph.edges[token1].keys())[:CARTOGRAPHER_NEIGHBOR_COUNT]
                 tokens.extend(neighbors)
             elif token2 in graph.edges:
-                neighbors = list(graph.edges[token2].keys())[:3]
+                neighbors = list(graph.edges[token2].keys())[:CARTOGRAPHER_NEIGHBOR_COUNT]
                 tokens.extend(neighbors)
             
             # Get more from recent memory if needed
-            if len(tokens) < 4:
-                recent = memory.get_recent(3)
+            if len(tokens) < CARTOGRAPHER_MIN_TOKENS:
+                recent = memory.get_recent(CARTOGRAPHER_RECENT_EPISODES)
                 for ep in recent:
                     ep_tokens = tokenize(ep.system_output + " " + ep.user_input)
-                    tokens.extend(ep_tokens[:2])
-                    if len(tokens) >= 6:
+                    tokens.extend(ep_tokens[:CARTOGRAPHER_TOKENS_PER_EPISODE])
+                    if len(tokens) >= CARTOGRAPHER_MIN_TOKENS:
                         break
             
-            tokens = tokens[:min(8, len(tokens))]
+            tokens = tokens[:min(CARTOGRAPHER_MAX_TOKENS, len(tokens))]
             
             # Create poetic description
             if len(tokens) >= 3:
@@ -370,8 +389,8 @@ class Cartographer(Agent):
         elif graph.nodes:
             # Fallback: use nodes
             node_list = list(graph.nodes.keys())
-            tokens = random.sample(node_list, min(5, len(node_list)))
-            if len(tokens) >= 3:
+            tokens = random.sample(node_list, min(CARTOGRAPHER_FALLBACK_SAMPLE_SIZE, len(node_list)))
+            if len(tokens) >= GARDENER_MIN_TOKENS_FOR_TEMPLATE:
                 template = random.choice(GRAMMAR_TEMPLATES)
                 text = apply_grammar_template(tokens, template)
             else:
@@ -379,8 +398,8 @@ class Cartographer(Agent):
         else:
             return Proposal("", [], self.style, self.name, 0.0)
         
-        tokens = tokens[:min(12, len(tokens))]
-        confidence = 0.6 + 0.3 * drives.cohesion
+        tokens = tokens[:min(MAX_TOKEN_LENGTH, len(tokens))]
+        confidence = CARTOGRAPHER_CONFIDENCE_BASE + CARTOGRAPHER_CONFIDENCE_COHESION_MULTIPLIER * drives.cohesion
         
         return Proposal(
             text=text,
@@ -444,15 +463,15 @@ class Coordinator:
             
             # Adjust by drive alignment
             if prop.agent_name == "Archivist":
-                weight *= (0.5 + 0.5 * drives.stability)
+                weight *= (COORDINATOR_DRIVE_ALIGNMENT_BASE + COORDINATOR_DRIVE_ALIGNMENT_MULTIPLIER * drives.stability)
             elif prop.agent_name == "Weaver":
-                weight *= (0.5 + 0.5 * drives.cohesion)
+                weight *= (COORDINATOR_DRIVE_ALIGNMENT_BASE + COORDINATOR_DRIVE_ALIGNMENT_MULTIPLIER * drives.cohesion)
             elif prop.agent_name == "Trickster":
-                weight *= (0.5 + 0.5 * drives.novelty)
+                weight *= (COORDINATOR_DRIVE_ALIGNMENT_BASE + COORDINATOR_DRIVE_ALIGNMENT_MULTIPLIER * drives.novelty)
             elif prop.agent_name == "Gardener":
-                weight *= (0.5 + 0.5 * drives.cohesion)
+                weight *= (COORDINATOR_DRIVE_ALIGNMENT_BASE + COORDINATOR_DRIVE_ALIGNMENT_MULTIPLIER * drives.cohesion)
             elif prop.agent_name == "Cartographer":
-                weight *= (0.5 + 0.5 * drives.expression)
+                weight *= (COORDINATOR_DRIVE_ALIGNMENT_BASE + COORDINATOR_DRIVE_ALIGNMENT_MULTIPLIER * drives.expression)
             
             weights.append(weight)
         

@@ -62,6 +62,22 @@ class WorldState:
     silence_mode: bool = False  # Suppress visible output
     primordial_lexicon_initialized: bool = False  # Flag to ensure lexicon seeded only once
     
+    # Species continuity pressure (SYSTEM 11)
+    population_pressure: float = 0.0  # 0..1 (pressure to reproduce)
+    extinction_risk: float = 0.0  # 0..1 (risk of species extinction)
+    turns_since_last_birth: int = 0  # Track turns without births
+    world_state: str = "alive"  # "alive" or "dead_world" (SYSTEM 15)
+    
+    # SYSTEM D: Generational trauma/memory
+    generational_trauma: float = 0.0  # Accumulates from deaths, reduces conflict, increases cooperation
+    deaths_last_50_turns: int = 0  # Track recent deaths for trauma calculation
+    
+    # POPULATION COMPRESSION: Global population metrics
+    total_population: int = 0  # active_agents + child_pools across all districts
+    active_agents: int = 0  # Total active agents (adults)
+    total_child_pool: int = 0  # Total children in compressed pools
+    civilization_phase: str = "survival"  # survival, growth, stable, strain, decline
+    
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
         result = {
@@ -163,24 +179,23 @@ class World:
         return self.state
     
     def save(self):
-        """Save world state to disk with backup."""
+        """
+        Save world state to PostgreSQL (fire-and-forget).
+        
+        This method does NOT block. Errors are logged but not propagated.
+        """
         if self.state is None:
             return
         
-        # Create backup of existing file
-        if self.state_file.exists():
-            try:
-                import shutil
-                shutil.copy2(self.state_file, self.backup_file)
-            except:
-                pass
-        
-        # Save new state
+        # Write to PostgreSQL asynchronously
         try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(self.state.to_dict(), f, indent=2, ensure_ascii=False)
+            from .persistence.snapshot_writer import write_snapshot
+            write_snapshot(self.state.turn, self.state.to_dict())
         except Exception as e:
-            print(f"Error saving state: {e}")
+            # Log error but don't propagate - simulation must continue
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error saving world state: {e}", exc_info=True)
     
     def update_graph_from_tokens(self, tokens: List[str], weight_multiplier: float = 1.0):
         """

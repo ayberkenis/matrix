@@ -23,7 +23,7 @@ MATRIX_DEBUG = os.getenv("MATRIX_DEBUG", "false").lower() in ("true", "1", "yes"
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI, fresh: bool = False):
     """Lifespan context manager for startup/shutdown."""
     global state_store, command_queue, world_runner, version_manager
     
@@ -47,7 +47,7 @@ async def lifespan(app: FastAPI):
     version_manager = VersionManager(data_dir="data")
     version_manager.load()  # Load or create version data
     
-    simulation = Simulation(data_dir="data", autopilot_enabled=True)
+    simulation = Simulation(data_dir="data", autopilot_enabled=True, fresh=fresh)
     state_store = MatrixStateStore()
     command_queue = MatrixCommandQueue()
     world_runner = WorldRunner(simulation, state_store, command_queue, version_manager)
@@ -70,13 +70,23 @@ async def lifespan(app: FastAPI):
         print("Living Matrix background runner stopped")
 
 
-def create_app() -> FastAPI:
-    """Create and configure FastAPI application."""
+def create_app(fresh: bool = False) -> FastAPI:
+    """Create and configure FastAPI application.
+    
+    Args:
+        fresh: If True, reset database before starting (clears all snapshots and metrics)
+    """
+    # Create a closure to pass fresh flag to lifespan
+    @asynccontextmanager
+    async def lifespan_with_fresh(app: FastAPI):
+        async with lifespan(app, fresh=fresh):
+            yield
+    
     app = FastAPI(
         title="Living Matrix API",
         description="REST API and WebSocket for Living Matrix simulation",
         version="1.0.0",
-        lifespan=lifespan
+        lifespan=lifespan_with_fresh
     )
     
     # CORS middleware (allow all origins for development)

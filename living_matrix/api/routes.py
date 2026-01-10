@@ -331,4 +331,44 @@ def setup_routes(debug_mode: bool = False):
             "count": len(beliefs)
         }
     
+    @router.get("/agents/{agent_id}/relationships")
+    async def get_agent_relationships(agent_id: str):
+        """Get relationships for a specific agent."""
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        agent = _state_store.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+        
+        relationships = agent.get('relationships', {})
+        return {
+            "agent_id": agent_id,
+            "relationships": relationships,
+            "count": len(relationships)
+        }
+    
+    @router.get("/population/stats")
+    async def get_population_stats():
+        """Get population statistics (alive, dead, age groups, births, deaths)."""
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        # Get population stats from simulation (would need to expose this)
+        # For now, calculate from agents
+        agents = _state_store.get_agents()
+        alive = [a for a in agents if a.get('is_alive', True)]
+        age_groups = {
+            "children": sum(1 for a in alive if a.get('age', 0) < 100),
+            "adults": sum(1 for a in alive if 100 <= a.get('age', 0) < 800),
+            "elderly": sum(1 for a in alive if a.get('age', 0) >= 800)
+        }
+        
+        return {
+            "alive": len(alive),
+            "total": len(agents),
+            "age_groups": age_groups,
+            "average_age": sum(a.get('age', 0) for a in alive) / len(alive) if alive else 0
+        }
+    
     return router

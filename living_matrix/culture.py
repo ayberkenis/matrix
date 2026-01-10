@@ -2,45 +2,34 @@
 
 import random
 from typing import Dict, Optional
-from dataclasses import dataclass, field, asdict
 import logging
+
+from .dataclasses import Culture
+from .constants.culture_constants import (
+    DEFAULT_COLLECTIVISM, DEFAULT_OBEDIENCE, DEFAULT_AGGRESSION, DEFAULT_RISK_TOLERANCE,
+    INITIAL_COLLECTIVISM_MIN, INITIAL_COLLECTIVISM_MAX,
+    INITIAL_OBEDIENCE_MIN, INITIAL_OBEDIENCE_MAX,
+    INITIAL_AGGRESSION_MIN, INITIAL_AGGRESSION_MAX,
+    INITIAL_RISK_TOLERANCE_MIN, INITIAL_RISK_TOLERANCE_MAX,
+    DEFAULT_CULTURE_DRIFT_RATE, ESCALATION_AGGRESSION_FACTOR_MULTIPLIER,
+    ESCALATION_OBEDIENCE_FACTOR_MULTIPLIER, ESCALATION_BASE_FACTOR,
+    COOPERATION_COLLECTIVISM_FACTOR_MULTIPLIER, COOPERATION_AGGRESSION_FACTOR_MULTIPLIER,
+    COOPERATION_BASE_FACTOR, VIOLENCE_AGGRESSION_FACTOR_MULTIPLIER,
+    VIOLENCE_OBEDIENCE_FACTOR_MULTIPLIER, VIOLENCE_BASE_FACTOR,
+    HIGH_OBEDIENCE_THRESHOLD, HIGH_AGGRESSION_THRESHOLD, HIGH_COLLECTIVISM_THRESHOLD,
+    QUIET_SUFFERING_VIOLENCE_MOD, QUIET_SUFFERING_MIGRATION_MOD, QUIET_SUFFERING_COOPERATION_MOD,
+    RIOTS_VIOLENCE_MOD, RIOTS_MIGRATION_MOD, RIOTS_COOPERATION_MOD,
+    MUTUAL_AID_VIOLENCE_MOD, MUTUAL_AID_MIGRATION_MOD, MUTUAL_AID_COOPERATION_MOD,
+    BALANCED_VIOLENCE_MOD, BALANCED_MIGRATION_MOD, BALANCED_COOPERATION_MOD,
+    VIOLENCE_AGGRESSION_INCREASE, VIOLENCE_OBEDIENCE_DECREASE,
+    COOPERATION_COLLECTIVISM_INCREASE, COOPERATION_AGGRESSION_DECREASE,
+    AUTHORITY_OBEDIENCE_INCREASE
+)
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class Culture:
-    """Cultural traits of a district."""
-    collectivism: float = 0.5  # 0.0 (individualistic) to 1.0 (collectivist)
-    obedience: float = 0.5  # 0.0 (rebellious) to 1.0 (obedient)
-    aggression: float = 0.5  # 0.0 (peaceful) to 1.0 (aggressive)
-    risk_tolerance: float = 0.5  # 0.0 (risk-averse) to 1.0 (risk-seeking)
-    
-    def to_dict(self) -> dict:
-        """Serialize to dictionary."""
-        return {
-            "collectivism": self.collectivism,
-            "obedience": self.obedience,
-            "aggression": self.aggression,
-            "risk_tolerance": self.risk_tolerance
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict) -> "Culture":
-        """Deserialize from dictionary."""
-        return cls(
-            collectivism=data.get("collectivism", 0.5),
-            obedience=data.get("obedience", 0.5),
-            aggression=data.get("aggression", 0.5),
-            risk_tolerance=data.get("risk_tolerance", 0.5)
-        )
-    
-    def normalize(self):
-        """Ensure all values are in [0, 1] range."""
-        self.collectivism = max(0.0, min(1.0, self.collectivism))
-        self.obedience = max(0.0, min(1.0, self.obedience))
-        self.aggression = max(0.0, min(1.0, self.aggression))
-        self.risk_tolerance = max(0.0, min(1.0, self.risk_tolerance))
+# Culture is now imported from dataclasses
+# The class definition is in dataclasses/culture_dataclasses.py
 
 
 class CultureSystem:
@@ -51,7 +40,7 @@ class CultureSystem:
         self.seed = seed
         random.seed(seed)
         self.cultures: Dict[str, Culture] = {}  # district_id -> Culture
-        self.culture_drift_rate = 0.005  # Slow drift over time
+        self.culture_drift_rate = DEFAULT_CULTURE_DRIFT_RATE  # Slow drift over time
     
     def initialize_district_culture(self, district_id: str, base_culture: Optional[Culture] = None):
         """
@@ -66,10 +55,10 @@ class CultureSystem:
         else:
             # Generate random culture
             self.cultures[district_id] = Culture(
-                collectivism=random.uniform(0.2, 0.8),
-                obedience=random.uniform(0.2, 0.8),
-                aggression=random.uniform(0.2, 0.8),
-                risk_tolerance=random.uniform(0.2, 0.8)
+                collectivism=random.uniform(INITIAL_COLLECTIVISM_MIN, INITIAL_COLLECTIVISM_MAX),
+                obedience=random.uniform(INITIAL_OBEDIENCE_MIN, INITIAL_OBEDIENCE_MAX),
+                aggression=random.uniform(INITIAL_AGGRESSION_MIN, INITIAL_AGGRESSION_MAX),
+                risk_tolerance=random.uniform(INITIAL_RISK_TOLERANCE_MIN, INITIAL_RISK_TOLERANCE_MAX)
             )
     
     def get_culture(self, district_id: str) -> Optional[Culture]:
@@ -95,8 +84,8 @@ class CultureSystem:
             return base_speed
         
         # High aggression and low obedience = faster escalation
-        aggression_factor = 1.0 + (culture.aggression - 0.5) * 0.4
-        obedience_factor = 1.0 - (culture.obedience - 0.5) * 0.3
+        aggression_factor = ESCALATION_BASE_FACTOR + (culture.aggression - 0.5) * ESCALATION_AGGRESSION_FACTOR_MULTIPLIER
+        obedience_factor = ESCALATION_BASE_FACTOR - (culture.obedience - 0.5) * ESCALATION_OBEDIENCE_FACTOR_MULTIPLIER
         
         return base_speed * aggression_factor * obedience_factor
     
@@ -117,8 +106,8 @@ class CultureSystem:
         
         # High collectivism = more cooperation
         # High aggression = less cooperation
-        collectivism_factor = 1.0 + (culture.collectivism - 0.5) * 0.4
-        aggression_factor = 1.0 - (culture.aggression - 0.5) * 0.3
+        collectivism_factor = COOPERATION_BASE_FACTOR + (culture.collectivism - 0.5) * COOPERATION_COLLECTIVISM_FACTOR_MULTIPLIER
+        aggression_factor = COOPERATION_BASE_FACTOR - (culture.aggression - 0.5) * COOPERATION_AGGRESSION_FACTOR_MULTIPLIER
         
         return base_likelihood * collectivism_factor * aggression_factor
     
@@ -139,8 +128,8 @@ class CultureSystem:
         
         # High aggression = more violence
         # High obedience = less violence (authority prevents it)
-        aggression_factor = 1.0 + (culture.aggression - 0.5) * 0.5
-        obedience_factor = 1.0 - (culture.obedience - 0.5) * 0.4
+        aggression_factor = VIOLENCE_BASE_FACTOR + (culture.aggression - 0.5) * VIOLENCE_AGGRESSION_FACTOR_MULTIPLIER
+        obedience_factor = VIOLENCE_BASE_FACTOR - (culture.obedience - 0.5) * VIOLENCE_OBEDIENCE_FACTOR_MULTIPLIER
         
         return base_likelihood * aggression_factor * obedience_factor
     
@@ -163,26 +152,26 @@ class CultureSystem:
         # Low obedience + high stress = riots (high violence, high migration)
         # High collectivism + high stress = mutual aid (high cooperation)
         
-        if culture.obedience > 0.7:
+        if culture.obedience > HIGH_OBEDIENCE_THRESHOLD:
             # Quiet suffering
-            violence_mod = 0.6
-            migration_mod = 0.5
-            cooperation_mod = 0.8
-        elif culture.aggression > 0.7:
+            violence_mod = QUIET_SUFFERING_VIOLENCE_MOD
+            migration_mod = QUIET_SUFFERING_MIGRATION_MOD
+            cooperation_mod = QUIET_SUFFERING_COOPERATION_MOD
+        elif culture.aggression > HIGH_AGGRESSION_THRESHOLD:
             # Riots
-            violence_mod = 1.5
-            migration_mod = 1.3
-            cooperation_mod = 0.7
-        elif culture.collectivism > 0.7:
+            violence_mod = RIOTS_VIOLENCE_MOD
+            migration_mod = RIOTS_MIGRATION_MOD
+            cooperation_mod = RIOTS_COOPERATION_MOD
+        elif culture.collectivism > HIGH_COLLECTIVISM_THRESHOLD:
             # Mutual aid
-            violence_mod = 0.7
-            migration_mod = 0.8
-            cooperation_mod = 1.4
+            violence_mod = MUTUAL_AID_VIOLENCE_MOD
+            migration_mod = MUTUAL_AID_MIGRATION_MOD
+            cooperation_mod = MUTUAL_AID_COOPERATION_MOD
         else:
             # Balanced
-            violence_mod = 1.0
-            migration_mod = 1.0
-            cooperation_mod = 1.0
+            violence_mod = BALANCED_VIOLENCE_MOD
+            migration_mod = BALANCED_MIGRATION_MOD
+            cooperation_mod = BALANCED_COOPERATION_MOD
         
         return {
             "cooperation": cooperation_mod,
@@ -224,15 +213,15 @@ class CultureSystem:
         
         if event_type in ["riot", "violence", "conflict"]:
             # Violence increases aggression, decreases obedience
-            culture.aggression = min(1.0, culture.aggression + severity * 0.1)
-            culture.obedience = max(0.0, culture.obedience - severity * 0.05)
+            culture.aggression = min(1.0, culture.aggression + severity * VIOLENCE_AGGRESSION_INCREASE)
+            culture.obedience = max(0.0, culture.obedience - severity * VIOLENCE_OBEDIENCE_DECREASE)
         elif event_type in ["aid", "cooperation", "mutual_aid"]:
             # Cooperation increases collectivism
-            culture.collectivism = min(1.0, culture.collectivism + severity * 0.1)
-            culture.aggression = max(0.0, culture.aggression - severity * 0.05)
+            culture.collectivism = min(1.0, culture.collectivism + severity * COOPERATION_COLLECTIVISM_INCREASE)
+            culture.aggression = max(0.0, culture.aggression - severity * COOPERATION_AGGRESSION_DECREASE)
         elif event_type in ["crackdown", "authority_intervention"]:
             # Authority increases obedience
-            culture.obedience = min(1.0, culture.obedience + severity * 0.1)
+            culture.obedience = min(1.0, culture.obedience + severity * AUTHORITY_OBEDIENCE_INCREASE)
         
         culture.normalize()
     

@@ -201,7 +201,7 @@ class WorldRunner:
                         if hasattr(district, 'culture') and district.culture:
                             district_culture = district.culture.to_dict()
                         
-                        districts.append({
+                        district_dict = {
                             "id": district_id,
                             "name": district.district_name,
                             "tension": round(district.tension_state.tension, 1),  # Legacy
@@ -235,7 +235,20 @@ class WorldRunner:
                                 for e in list(district.psychology.recent_events)[-5:]
                             ],
                             "risk_flags": world_dynamics.get_risk_flags(district_id)
-                        })
+                        }
+                        # Add birth_pressure if available (SYSTEM 13)
+                        if hasattr(district, 'birth_pressure'):
+                            district_dict["birth_pressure"] = round(district.birth_pressure, 2)
+                        # POPULATION COMPRESSION: Add population metrics
+                        if hasattr(district, 'child_pool'):
+                            district_dict["child_pool"] = district.child_pool
+                        if hasattr(district, 'active_agents'):
+                            district_dict["active_agents"] = district.active_agents
+                        if hasattr(district, 'total_population'):
+                            district_dict["total_population"] = district.total_population
+                        if hasattr(district, 'population_pressure'):
+                            district_dict["population_pressure"] = round(district.population_pressure, 3)
+                        districts.append(district_dict)
             elif sim.economy_system:
                 # Fallback to old economy system
                 for district_id, region in sim.world_map.regions.items():
@@ -250,52 +263,84 @@ class WorldRunner:
                             "scarcity": economy.scarcity
                         })
         
-        # Get agents
+        # Get agents (alive agents only for main state)
         agents = []
         if sim.human_agent_system:
-            for agent in sim.human_agent_system.agents.values():
-                # Get agent intent
-                agent_intent = None
-                if hasattr(agent, 'intent'):
-                    agent_intent = agent.intent.to_dict()
-                elif hasattr(sim, 'agent_system') and sim.agent_system:
-                    # Try to get from agent_system
-                    world_agent = sim.agent_system.get_agent(agent.id)
-                    if world_agent and hasattr(world_agent, 'intent'):
-                        agent_intent = world_agent.intent.to_dict()
-                
-                # Get agent beliefs
-                agent_beliefs = {}
-                if hasattr(agent, 'beliefs'):
-                    agent_beliefs = {
-                        topic: belief.to_dict() 
-                        for topic, belief in agent.beliefs.items()
-                    }
-                
-                agents.append({
-                    "id": agent.id,
-                    "name": agent.name,
-                    "district": agent.district,
-                    "location": agent.location,
-                    "role": agent.role,
-                    "needs": {
-                        "hunger": agent.needs.hunger,
-                        "rest": agent.needs.rest,
-                        "safety": agent.needs.safety,
-                        "belonging": agent.needs.belonging,
-                        "purpose": agent.needs.purpose
-                    },
-                    "mood": agent.mood,
-                    "goals": agent.goals,
-                    "current_action": agent.current_action,
-                    "intent": agent_intent,  # New intent
-                    "beliefs": agent_beliefs,  # New beliefs
-                    "inventory": {
-                        "food": agent.inventory.food,
-                        "credits": agent.inventory.credits,
-                        "tools": agent.inventory.tools
-                    }
-                })
+            # Check if agents dict exists (even if empty)
+            if not hasattr(sim.human_agent_system, 'agents'):
+                # System exists but agents dict missing - this shouldn't happen
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning("human_agent_system exists but has no 'agents' attribute")
+            elif sim.human_agent_system.agents:
+                # Include all agents from agents dict (alive agents)
+                # The agents dict only contains alive agents (dead ones are moved to dead_agents)
+                for agent in sim.human_agent_system.agents.values():
+                    # Include agent (all in agents dict should be alive, but check for safety)
+                    if not hasattr(agent, 'is_alive') or getattr(agent, 'is_alive', True):
+                        # Get agent intent
+                        agent_intent = None
+                        if hasattr(agent, 'intent'):
+                            agent_intent = agent.intent.to_dict()
+                        elif hasattr(sim, 'agent_system') and sim.agent_system:
+                            # Try to get from agent_system
+                            world_agent = sim.agent_system.get_agent(agent.id)
+                            if world_agent and hasattr(world_agent, 'intent'):
+                                agent_intent = world_agent.intent.to_dict()
+                        
+                        # Get agent beliefs
+                        agent_beliefs = {}
+                        if hasattr(agent, 'beliefs'):
+                            agent_beliefs = {
+                                topic: belief.to_dict() 
+                                for topic, belief in agent.beliefs.items()
+                            }
+                        
+                        # Get agent relationships
+                        agent_relationships = {}
+                        if hasattr(agent, 'relationships'):
+                            agent_relationships = {
+                                target_id: rel.to_dict() 
+                                for target_id, rel in agent.relationships.items()
+                            }
+                        
+                        agents.append({
+                            "id": agent.id,
+                            "name": agent.name,
+                            "district": agent.district,
+                            "location": agent.location,
+                            "role": agent.role,
+                            "sex": getattr(agent, 'sex', 'unknown'),  # Add sex field
+                            "age": getattr(agent, 'age', 0),
+                            "lifespan": getattr(agent, 'lifespan', 1000),
+                            "is_alive": getattr(agent, 'is_alive', True),
+                            "children_ids": getattr(agent, 'children_ids', []),
+                            "parents_ids": getattr(agent, 'parents_ids', []),
+                            "needs": {
+                                "hunger": agent.needs.hunger,
+                                "rest": agent.needs.rest,
+                                "safety": agent.needs.safety,
+                                "belonging": agent.needs.belonging,
+                                "purpose": agent.needs.purpose
+                            },
+                            "mood": agent.mood,
+                            "goals": agent.goals,
+                            "current_action": agent.current_action,
+                            "intent": agent_intent,  # New intent
+                            "beliefs": agent_beliefs,  # New beliefs
+                            "relationships": agent_relationships,  # New relationships
+                            "inventory": {
+                                "food": agent.inventory.food,
+                                "credits": agent.inventory.credits,
+                                "tools": agent.inventory.tools
+                            },
+                            # Survival drives (SYSTEM 10)
+                            "survival_drive": getattr(agent, 'survival_drive', 0.8),
+                            "reproduction_drive": getattr(agent, 'reproduction_drive', 0.5),
+                            "legacy_drive": getattr(agent, 'legacy_drive', 0.3),
+                            "must_attempt_reproduction": getattr(agent, 'must_attempt_reproduction', False),
+                            "future_resource_bonus": getattr(agent, 'future_resource_bonus', 0.0)
+                        })
         
         # Get events
         events = []
@@ -347,6 +392,13 @@ class WorldRunner:
                 stability = "recovering"
                 risk_level = "low"
             
+            # POPULATION COMPRESSION: Get global population metrics
+            global_active_agents = len([a for a in sim.human_agent_system.agents.values() if a.is_alive]) if sim.human_agent_system else 0
+            global_child_pool = sum(sim.human_agent_system.child_pools.values()) if sim.human_agent_system else 0
+            global_total_population = global_active_agents + global_child_pool
+            global_population_pressure = sim.world.state.population_pressure if hasattr(sim.world.state, 'population_pressure') else 0.0
+            civilization_phase = sim.world.state.civilization_phase if hasattr(sim.world.state, 'civilization_phase') else "unknown"
+            
             economy = {
                 "total_food": round(total_food, 1),
                 "total_credits": round(total_credits, 1),
@@ -358,7 +410,13 @@ class WorldRunner:
                 "system_health": {
                     "stability": stability,
                     "risk_level": risk_level
-                }
+                },
+                # POPULATION COMPRESSION: Add global population metrics
+                "active_agents": global_active_agents,
+                "child_pool": global_child_pool,
+                "total_population": global_total_population,
+                "population_pressure": round(global_population_pressure, 3),
+                "civilization_phase": civilization_phase
             }
         elif sim.economy_system:
             # Fallback to old economy system

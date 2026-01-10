@@ -76,6 +76,20 @@
 						"description": "Get recent events from the world"
 					},
 					"response": []
+				},
+				{
+					"name": "Get Population Stats",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/population/stats",
+							"host": ["{{base_url}}"],
+							"path": ["population", "stats"]
+						},
+						"description": "Get population statistics (alive, dead, age groups, births, deaths)"
+					},
+					"response": []
 				}
 			]
 		},
@@ -121,6 +135,20 @@
 							"path": ["agents", "human_0", "beliefs"]
 						},
 						"description": "Get beliefs for a specific agent (subjective reality)"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Agent Relationships",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/agents/human_0/relationships",
+							"host": ["{{base_url}}"],
+							"path": ["agents", "human_0", "relationships"]
+						},
+						"description": "Get relationships for a specific agent (affection, trust, familiarity)"
 					},
 					"response": []
 				}

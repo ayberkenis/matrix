@@ -145,14 +145,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     time_since_last_update = current_time - last_update_send_time
                     if time_since_last_update >= event_send_interval:
                         try:
-                            # 1. Send new events (one at a time)
+                            # 1. Send new events (matching API format)
                             new_events = _state_store.get_new_events_since(last_event_count)
                             if new_events:
+                                # Send events matching API format: {"events": [...], "count": N}
                                 await manager.send_personal_message({
-                                    "type": "event",
-                                    "payload": new_events[0]
+                                    "type": "events",
+                                    "payload": {
+                                        "events": new_events,  # Send all new events
+                                        "count": len(new_events)
+                                    }
                                 }, websocket)
-                                last_event_count += 1
+                                last_event_count += len(new_events)
                             
                             # 2. Send causality updates (if new records)
                             causality_data = _state_store.get_causality_data()
@@ -217,25 +221,13 @@ async def websocket_endpoint(websocket: WebSocket):
                                 }
                                 current_districts_hash = hash_data(districts_data)
                                 if current_districts_hash != last_districts_hash:
+                                    # Send districts matching exact API format
+                                    districts_list = current_state.districts
                                     await manager.send_personal_message({
                                         "type": "districts",
                                         "payload": {
-                                            "districts": [
-                                                {
-                                                    "id": d.get('id'),
-                                                    "name": d.get('name'),
-                                                    "tension": d.get('tension'),  # Legacy single tension
-                                                    "tension_multi": d.get('tension_multi'),  # Multi-dimensional tension
-                                                    "tension_trend": d.get('tension_trend'),
-                                                    "intent": d.get('intent'),
-                                                    "pressure": d.get('pressure'),  # Food, jobs, weather, migration, rumor, inequality
-                                                    "resources": d.get('resources'),  # Food stock, jobs available
-                                                    "psychology": d.get('psychology'),  # Trust, trauma, fatigue
-                                                    "risk_flags": d.get('risk_flags', []),  # Risk indicators
-                                                    "recent_events": d.get('recent_events', [])[-3:]  # Last 3 events
-                                                }
-                                                for d in current_state.districts
-                                            ]
+                                            "districts": districts_list,  # Send exact same format as API
+                                            "count": len(districts_list)
                                         }
                                     }, websocket)
                                     last_districts_hash = current_districts_hash
@@ -269,6 +261,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     "district": a.get('district'),
                                                     "location": a.get('location'),
                                                     "role": a.get('role'),
+                                                    "sex": a.get('sex', 'unknown'),  # Add sex field
                                                     "needs": a.get('needs'),
                                                     "mood": a.get('mood'),
                                                     "goals": a.get('goals'),
@@ -345,8 +338,11 @@ async def broadcast_state_update(state_store: MatrixStateStore):
 
 
 async def broadcast_event(event: dict, state_store: MatrixStateStore):
-    """Broadcast a new event to all connected clients."""
+    """Broadcast a new event to all connected clients (matching API format)."""
     await manager.broadcast({
-        "type": "event",
-        "payload": event
+        "type": "events",
+        "payload": {
+            "events": [event],  # Wrap in events array matching API format
+            "count": 1
+        }
     })
