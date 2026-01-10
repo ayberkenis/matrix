@@ -22,4 +22,4 @@ EXPOSE 8000
 # Set MATRIX_DEBUG=false by default (can be overridden with -e)
 ENV MATRIX_DEBUG=false
 
-CMD ["python", "-m", "living_matrix", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "living_matrix",  "--host", "0.0.0.0", "--port", "8000"]
