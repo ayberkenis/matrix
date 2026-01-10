@@ -1,5 +1,6 @@
 """FastAPI application for Living Matrix."""
 
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,10 @@ state_store: MatrixStateStore = None
 command_queue: MatrixCommandQueue = None
 world_runner: WorldRunner = None
 version_manager: VersionManager = None
+
+# Debug mode - enable control endpoints (pause, resume, speed)
+# Set via environment variable MATRIX_DEBUG=true or MATRIX_DEBUG=1
+MATRIX_DEBUG = os.getenv("MATRIX_DEBUG", "false").lower() in ("true", "1", "yes", "on")
 
 
 @asynccontextmanager
@@ -84,8 +89,14 @@ def create_app() -> FastAPI:
     )
     
     # Setup routes (will use globals set in lifespan)
-    router = setup_routes()
+    router = setup_routes(debug_mode=MATRIX_DEBUG)
     app.include_router(router)
+    
+    # Log debug mode status
+    if MATRIX_DEBUG:
+        print("⚠️  MATRIX_DEBUG enabled - Control endpoints (pause/resume/speed) are available")
+    else:
+        print("ℹ️  MATRIX_DEBUG disabled - Control endpoints are hidden")
     
     # WebSocket endpoint
     @app.websocket("/ws")

@@ -21,8 +21,13 @@ def set_dependencies(state_store: MatrixStateStore, command_queue: MatrixCommand
     _version_manager = version_manager
 
 
-def setup_routes():
-    """Setup routes (uses global state_store and command_queue)."""
+def setup_routes(debug_mode: bool = False):
+    """
+    Setup routes (uses global state_store and command_queue).
+    
+    Args:
+        debug_mode: If True, enables control endpoints (pause, resume, speed)
+    """
     
     @router.get("/version")
     async def get_version():
@@ -120,36 +125,38 @@ def setup_routes():
             "count": len(events)
         }
     
-    @router.post("/control/pause")
-    async def pause():
-        """Pause the simulation."""
-        if _command_queue is None:
-            raise HTTPException(status_code=503, detail="World not initialized")
-        command = MatrixCommand(command="pause")
-        await _command_queue.put(command)
-        return {"status": "paused"}
-    
-    @router.post("/control/resume")
-    async def resume():
-        """Resume the simulation."""
-        if _command_queue is None:
-            raise HTTPException(status_code=503, detail="World not initialized")
-        command = MatrixCommand(command="resume")
-        await _command_queue.put(command)
-        return {"status": "resumed"}
-    
-    @router.post("/control/speed")
-    async def set_speed(data: Dict[str, Any]):
-        """Set simulation speed."""
-        if _command_queue is None:
-            raise HTTPException(status_code=503, detail="World not initialized")
-        ms = data.get("ms")
-        if ms is None or not isinstance(ms, (int, float)):
-            raise HTTPException(status_code=400, detail="Missing or invalid 'ms' parameter")
+    # Control endpoints - only available in debug mode
+    if debug_mode:
+        @router.post("/control/pause")
+        async def pause():
+            """Pause the simulation (debug mode only)."""
+            if _command_queue is None:
+                raise HTTPException(status_code=503, detail="World not initialized")
+            command = MatrixCommand(command="pause")
+            await _command_queue.put(command)
+            return {"status": "paused"}
         
-        command = MatrixCommand(command="set_speed", params={"ms": int(ms)})
-        await _command_queue.put(command)
-        return {"status": "speed_set", "ms": int(ms)}
+        @router.post("/control/resume")
+        async def resume():
+            """Resume the simulation (debug mode only)."""
+            if _command_queue is None:
+                raise HTTPException(status_code=503, detail="World not initialized")
+            command = MatrixCommand(command="resume")
+            await _command_queue.put(command)
+            return {"status": "resumed"}
+        
+        @router.post("/control/speed")
+        async def set_speed(data: Dict[str, Any]):
+            """Set simulation speed (debug mode only)."""
+            if _command_queue is None:
+                raise HTTPException(status_code=503, detail="World not initialized")
+            ms = data.get("ms")
+            if ms is None or not isinstance(ms, (int, float)):
+                raise HTTPException(status_code=400, detail="Missing or invalid 'ms' parameter")
+            
+            command = MatrixCommand(command="set_speed", params={"ms": int(ms)})
+            await _command_queue.put(command)
+            return {"status": "speed_set", "ms": int(ms)}
     
     @router.get("/world/causality")
     async def get_causality(limit: int = 50):
