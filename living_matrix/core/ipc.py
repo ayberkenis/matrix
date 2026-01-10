@@ -137,6 +137,37 @@ class MatrixStateStore:
                 'count': self._observation_count,
                 'last_turn': self._last_observation_turn
             }
+    
+    # Advanced AI systems data
+    def set_causality_data(self, causality_data: Dict[str, Any]):
+        """Set causality system data (thread-safe)."""
+        with self._lock:
+            self._causality_data = causality_data
+    
+    def get_causality_data(self) -> Optional[Dict[str, Any]]:
+        """Get causality system data (thread-safe)."""
+        with self._lock:
+            return getattr(self, '_causality_data', None)
+    
+    def set_emotional_data(self, emotional_data: Dict[str, Any]):
+        """Set emotional memory data (thread-safe)."""
+        with self._lock:
+            self._emotional_data = emotional_data
+    
+    def get_emotional_data(self) -> Optional[Dict[str, Any]]:
+        """Get emotional memory data (thread-safe)."""
+        with self._lock:
+            return getattr(self, '_emotional_data', None)
+    
+    def set_learned_rules_data(self, rules_data: Dict[str, Any]):
+        """Set learned rules data (thread-safe)."""
+        with self._lock:
+            self._learned_rules_data = rules_data
+    
+    def get_learned_rules_data(self) -> Optional[Dict[str, Any]]:
+        """Get learned rules data (thread-safe)."""
+        with self._lock:
+            return getattr(self, '_learned_rules_data', None)
 
 
 class MatrixCommandQueue:

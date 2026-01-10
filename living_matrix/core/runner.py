@@ -132,6 +132,9 @@ class WorldRunner:
         
         # Update state store
         self.state_store.update(state)
+        
+        # Update advanced AI systems data (every tick, but lightweight)
+        self._update_ai_systems_data()
     
     def _create_state_snapshot(self) -> MatrixState:
         """Create a read-only state snapshot."""
@@ -388,3 +391,33 @@ class WorldRunner:
             timestamp=state_data["timestamp"],
             weather_detail=state_data.get("weather_detail")
         )
+    
+    def _update_ai_systems_data(self):
+        """Update AI systems data in state store (causality, emotions, rules)."""
+        sim = self.simulation
+        
+        # Update causality data
+        if hasattr(sim, 'causality_system'):
+            recent_records = sim.causality_system.get_recent(limit=100)
+            causality_data = {
+                'records': [r.to_dict() for r in recent_records],
+                'total_records': len(sim.causality_system.records)
+            }
+            self.state_store.set_causality_data(causality_data)
+        
+        # Update emotional memory data
+        if hasattr(sim, 'emotional_memory'):
+            emotional_data = {
+                'summary': sim.emotional_memory.get_emotion_summary(),
+                'recent_traces': [t.to_dict() for t in sim.emotional_memory.get_recent(limit=50)],
+                'total_traces': len(sim.emotional_memory.traces)
+            }
+            self.state_store.set_emotional_data(emotional_data)
+        
+        # Update learned rules data
+        if hasattr(sim, 'learned_rules'):
+            rules_data = {
+                'rules': [r.to_dict() for r in sim.learned_rules.rules],
+                'total_rules': len(sim.learned_rules.rules)
+            }
+            self.state_store.set_learned_rules_data(rules_data)

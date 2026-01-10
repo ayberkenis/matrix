@@ -154,29 +154,78 @@ def setup_routes():
     @router.get("/world/causality")
     async def get_causality(limit: int = 50):
         """Get recent causal records."""
-        # Note: This requires access to simulation's causality_system
-        # For now, return placeholder - full implementation would need simulation reference
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        causality_data = _state_store.get_causality_data()
+        if not causality_data:
+            return {
+                "records": [],
+                "total_records": 0,
+                "message": "Causality system not yet initialized"
+            }
+        
+        # Limit records if requested
+        records = causality_data.get('records', [])
+        if limit < len(records):
+            records = records[-limit:]
+        
         return {
-            "message": "Causality system integrated - records available in simulation",
-            "note": "Full API access requires simulation reference integration"
+            "records": records,
+            "total_records": causality_data.get('total_records', 0),
+            "returned": len(records)
         }
     
     @router.get("/world/emotions")
     async def get_emotions():
         """Get emotional memory summary."""
-        # Note: This requires access to simulation's emotional_memory
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        emotional_data = _state_store.get_emotional_data()
+        if not emotional_data:
+            return {
+                "summary": {
+                    "fear": 0.0,
+                    "anger": 0.0,
+                    "hope": 0.0,
+                    "joy": 0.0,
+                    "sadness": 0.0,
+                    "surprise": 0.0
+                },
+                "recent_traces": [],
+                "total_traces": 0,
+                "message": "Emotional memory not yet initialized"
+            }
+        
         return {
-            "message": "Emotional memory system integrated",
-            "note": "Full API access requires simulation reference integration"
+            "summary": emotional_data.get('summary', {}),
+            "recent_traces": emotional_data.get('recent_traces', []),
+            "total_traces": emotional_data.get('total_traces', 0)
         }
     
     @router.get("/world/rules")
     async def get_learned_rules():
         """Get learned rules."""
-        # Note: This requires access to simulation's learned_rules
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        rules_data = _state_store.get_learned_rules_data()
+        if not rules_data:
+            return {
+                "rules": [],
+                "total_rules": 0,
+                "message": "Learned rules system not yet initialized"
+            }
+        
+        # Sort by confidence (highest first)
+        rules = rules_data.get('rules', [])
+        rules_sorted = sorted(rules, key=lambda r: r.get('confidence', 0.0), reverse=True)
+        
         return {
-            "message": "Learned rules system integrated",
-            "note": "Full API access requires simulation reference integration"
+            "rules": rules_sorted,
+            "total_rules": rules_data.get('total_rules', 0),
+            "returned": len(rules_sorted)
         }
     
     return router
