@@ -240,17 +240,25 @@ async def websocket_endpoint(websocket: WebSocket):
                                     }, websocket)
                                     last_districts_hash = current_districts_hash
                             
-                            # 6. Send agent updates (if changed - intent, relationships)
+                            # 6. Send agent updates (if changed - full agent data matching API format)
                             if current_state and current_state.agents:
+                                # Create hash from all agent data to detect any changes
                                 agents_data = {
                                     a.get('id'): {
+                                        'needs': a.get('needs'),
+                                        'mood': a.get('mood'),
+                                        'goals': a.get('goals'),
+                                        'current_action': a.get('current_action'),
                                         'intent': a.get('intent'),
-                                        'relationships': a.get('relationships')
+                                        'inventory': a.get('inventory'),
+                                        'location': a.get('location'),
+                                        'district': a.get('district')
                                     }
                                     for a in current_state.agents
                                 }
                                 current_agents_hash = hash_data(agents_data)
                                 if current_agents_hash != last_agents_hash:
+                                    # Send full agent payload matching API format
                                     await manager.send_personal_message({
                                         "type": "agents",
                                         "payload": {
@@ -258,11 +266,20 @@ async def websocket_endpoint(websocket: WebSocket):
                                                 {
                                                     "id": a.get('id'),
                                                     "name": a.get('name'),
+                                                    "district": a.get('district'),
+                                                    "location": a.get('location'),
+                                                    "role": a.get('role'),
+                                                    "needs": a.get('needs'),
+                                                    "mood": a.get('mood'),
+                                                    "goals": a.get('goals'),
+                                                    "current_action": a.get('current_action'),
                                                     "intent": a.get('intent'),
-                                                    "relationships": a.get('relationships')
+                                                    "inventory": a.get('inventory'),
+                                                    "relationships": a.get('relationships')  # Include if available
                                                 }
-                                                for a in current_state.agents[:10]  # Limit to first 10 for size
-                                            ]
+                                                for a in current_state.agents  # Send all agents, not limited
+                                            ],
+                                            "count": len(current_state.agents)
                                         }
                                     }, websocket)
                                     last_agents_hash = current_agents_hash

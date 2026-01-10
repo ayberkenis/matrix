@@ -300,9 +300,9 @@ Sent when any district data changes (tension, intent, pressure, resources, psych
 }
 ```
 
-### 7. `agents` - Agent Intent & Relationships Update
+### 7. `agents` - Agent Complete Update
 
-Sent when agent intents or relationships change (rate-limited to one per 2 seconds, limited to first 10 agents).
+Sent when any agent data changes (rate-limited to one per 2 seconds). Sends full agent payload matching API format.
 
 **Example:**
 
@@ -312,8 +312,21 @@ Sent when agent intents or relationships change (rate-limited to one per 2 secon
   "payload": {
     "agents": [
       {
-        "id": "agent_5",
-        "name": "AriKora",
+        "id": "human_0",
+        "name": "Jax Kora",
+        "district": "region_kora",
+        "location": "loc_23",
+        "role": "student",
+        "needs": {
+          "hunger": 100,
+          "rest": 84,
+          "safety": 0,
+          "belonging": 0,
+          "purpose": 46
+        },
+        "mood": 0.326,
+        "goals": ["get_food", "rest", "socialize"],
+        "current_action": "socialize",
         "intent": {
           "survive": 0.55,
           "explore": 0.3,
@@ -321,18 +334,36 @@ Sent when agent intents or relationships change (rate-limited to one per 2 secon
           "dominate": 0.2,
           "escape": 0.1
         },
+        "inventory": {
+          "food": 8,
+          "credits": 0,
+          "tools": 0
+        },
         "relationships": {
           "allies": [
-            { "id": "agent_12", "trust": 0.75 },
-            { "id": "agent_8", "trust": 0.68 }
+            { "id": "human_12", "trust": 0.75 },
+            { "id": "human_8", "trust": 0.68 }
           ],
-          "enemies": [{ "id": "agent_3", "conflict": 0.65 }],
-          "dependents": [{ "id": "agent_12", "dependency": 0.45 }]
+          "enemies": [{ "id": "human_3", "conflict": 0.65 }],
+          "dependents": [{ "id": "human_12", "dependency": 0.45 }]
         }
       },
       {
-        "id": "agent_12",
-        "name": "VexLume",
+        "id": "human_12",
+        "name": "Vex Lume",
+        "district": "region_central",
+        "location": "loc_15",
+        "role": "worker",
+        "needs": {
+          "hunger": 45,
+          "rest": 60,
+          "safety": 20,
+          "belonging": 35,
+          "purpose": 70
+        },
+        "mood": 0.52,
+        "goals": ["work", "cooperate"],
+        "current_action": "work",
         "intent": {
           "survive": 0.6,
           "explore": 0.25,
@@ -340,16 +371,22 @@ Sent when agent intents or relationships change (rate-limited to one per 2 secon
           "dominate": 0.15,
           "escape": 0.08
         },
+        "inventory": {
+          "food": 12,
+          "credits": 25,
+          "tools": 2
+        },
         "relationships": {
           "allies": [
-            { "id": "agent_5", "trust": 0.75 },
-            { "id": "agent_8", "trust": 0.6 }
+            { "id": "human_0", "trust": 0.75 },
+            { "id": "human_8", "trust": 0.6 }
           ],
           "enemies": [],
-          "dependents": [{ "id": "agent_5", "dependency": 0.4 }]
+          "dependents": [{ "id": "human_0", "dependency": 0.4 }]
         }
       }
-    ]
+    ],
+    "count": 2
   }
 }
 ```
