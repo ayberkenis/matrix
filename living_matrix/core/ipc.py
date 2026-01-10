@@ -39,6 +39,7 @@ class MatrixStateStore:
         self._state: Optional[MatrixState] = None
         self._event_history: deque = deque(maxlen=200)  # Last 200 events
         self._last_turn: int = 0  # Track last turn for change detection
+        self._last_event_ids: set = set()  # Track event IDs to detect new events
     
     def update(self, state: MatrixState):
         """Update the state snapshot (called by runner)."""
@@ -47,11 +48,23 @@ class MatrixStateStore:
             self._last_turn = state.turn
             # Add new events to history
             for event in state.events:
-                # Check if event is already in history (by description)
-                event_desc = event.get("description", "") if isinstance(event, dict) else str(event)
-                if not any(e.get("description", "") == event_desc if isinstance(e, dict) else str(e) == event_desc 
-                          for e in self._event_history):
+                # Create a unique ID for the event (using description + turn if available)
+                event_id = self._get_event_id(event)
+                if event_id not in self._last_event_ids:
                     self._event_history.append(event)
+                    self._last_event_ids.add(event_id)
+                    # Keep only last 200 event IDs to prevent memory growth
+                    if len(self._last_event_ids) > 200:
+                        # Remove oldest event IDs (simple approach: clear and rebuild)
+                        recent_ids = {self._get_event_id(e) for e in list(self._event_history)[-200:]}
+                        self._last_event_ids = recent_ids
+    
+    def _get_event_id(self, event: Dict[str, Any]) -> str:
+        """Generate a unique ID for an event."""
+        desc = event.get("description", "") if isinstance(event, dict) else str(event)
+        agent_id = event.get("agent_id", "") if isinstance(event, dict) else ""
+        turn = event.get("turn", 0) if isinstance(event, dict) else 0
+        return f"{turn}:{agent_id}:{desc}"
     
     def has_new_state(self, last_seen_turn: int) -> bool:
         """Check if state has been updated since last_seen_turn."""
@@ -67,6 +80,14 @@ class MatrixStateStore:
         """Get recent events (thread-safe)."""
         with self._lock:
             return list(self._event_history)[-limit:]
+    
+    def get_new_events_since(self, last_count: int) -> List[Dict[str, Any]]:
+        """Get new events since last_count (thread-safe)."""
+        with self._lock:
+            current_count = len(self._event_history)
+            if current_count > last_count:
+                return list(self._event_history)[last_count:]
+            return []
     
     def get_agents(self) -> List[Dict[str, Any]]:
         """Get all agents (thread-safe)."""

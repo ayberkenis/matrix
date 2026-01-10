@@ -246,7 +246,8 @@ class WorldRunner:
                     events.append({
                         "agent_id": event_tuple[0] if len(event_tuple) > 0 else None,
                         "description": event_tuple[1] if len(event_tuple) > 1 else str(event_tuple[0]),
-                        "type": event_tuple[2] if len(event_tuple) > 2 else None
+                        "type": event_tuple[2] if len(event_tuple) > 2 else None,
+                        "turn": sim.world.state.turn  # Add turn number for tracking
                     })
         
         # Get economy/world summary

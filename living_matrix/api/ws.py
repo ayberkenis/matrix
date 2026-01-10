@@ -118,16 +118,20 @@ async def websocket_endpoint(websocket: WebSocket):
                                 }
                             }, websocket)
                     
-                    # Check for new events using get_events() method
-                    current_events = _state_store.get_events(limit=200)
-                    if len(current_events) > last_event_count:
-                        new_events = current_events[last_event_count:]
+                    # Check for new events using improved method
+                    new_events = _state_store.get_new_events_since(last_event_count)
+                    if new_events:
+                        # Send each new event individually
                         for event in new_events:
-                            await manager.send_personal_message({
-                                "type": "event",
-                                "payload": event
-                            }, websocket)
-                        last_event_count = len(current_events)
+                            try:
+                                await manager.send_personal_message({
+                                    "type": "event",
+                                    "payload": event
+                                }, websocket)
+                            except Exception:
+                                # Connection closed, break out
+                                return
+                        last_event_count = len(_state_store.get_events())
                 
                 except Exception as e:
                     # Continue on error (connection might be closed)
