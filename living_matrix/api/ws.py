@@ -4,6 +4,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 from typing import Set, Optional
 import json
 import time
+import hashlib
 from living_matrix.core.ipc import MatrixStateStore
 
 # Global state store (set by app.py)
@@ -88,16 +89,32 @@ async def websocket_endpoint(websocket: WebSocket):
         last_turn = state.turn if state else 0
         last_event_count = len(_state_store.get_events()) if _state_store else 0
         
+        # Track last sent data for new update types
+        last_causality_count = 0
+        last_emotions_hash = None
+        last_rules_count = 0
+        last_districts_hash = None
+        last_agents_hash = None
+        
         # Keep connection alive and stream updates
         import asyncio
+        
+        def hash_data(data):
+            """Create a hash of data to detect changes."""
+            if data is None:
+                return None
+            return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
         
         # Create a task to periodically check for updates
         async def check_updates():
             """Periodically check for state updates and send them."""
             nonlocal last_turn, last_event_count
-            event_send_interval = 2.0  # Send events every 2 seconds (slower)
+            nonlocal last_causality_count, last_emotions_hash, last_rules_count
+            nonlocal last_districts_hash, last_agents_hash
+            
+            event_send_interval = 2.0  # Send events and other updates every 2 seconds (slower)
             state_check_interval = 0.5  # Check state every 500ms (keep responsive)
-            last_event_send_time = time.time()
+            last_update_send_time = time.time()
             
             while True:
                 try:
@@ -124,23 +141,138 @@ async def websocket_endpoint(websocket: WebSocket):
                                 }
                             }, websocket)
                     
-                    # Check for new events, but send them at a slower rate
-                    time_since_last_event = current_time - last_event_send_time
-                    if time_since_last_event >= event_send_interval:
-                        new_events = _state_store.get_new_events_since(last_event_count)
-                        if new_events:
-                            # Send only one event at a time to slow down the rate
-                            # Send the first new event
-                            try:
+                    # Send updates at slower rate (same as events)
+                    time_since_last_update = current_time - last_update_send_time
+                    if time_since_last_update >= event_send_interval:
+                        try:
+                            # 1. Send new events (one at a time)
+                            new_events = _state_store.get_new_events_since(last_event_count)
+                            if new_events:
                                 await manager.send_personal_message({
                                     "type": "event",
                                     "payload": new_events[0]
                                 }, websocket)
-                                last_event_count += 1  # Only increment by 1
-                                last_event_send_time = current_time
-                            except Exception:
-                                # Connection closed, break out
-                                return
+                                last_event_count += 1
+                            
+                            # 2. Send causality updates (if new records)
+                            causality_data = _state_store.get_causality_data()
+                            if causality_data:
+                                current_causality_count = causality_data.get('total_records', 0)
+                                if current_causality_count > last_causality_count:
+                                    recent = causality_data.get('records', [])[-5:]  # Last 5 new records
+                                    if recent:
+                                        await manager.send_personal_message({
+                                            "type": "causality",
+                                            "payload": {
+                                                "new_records": recent,
+                                                "total_records": current_causality_count
+                                            }
+                                        }, websocket)
+                                    last_causality_count = current_causality_count
+                            
+                            # 3. Send emotional memory updates (if changed)
+                            emotional_data = _state_store.get_emotional_data()
+                            if emotional_data:
+                                current_hash = hash_data(emotional_data.get('summary'))
+                                if current_hash != last_emotions_hash:
+                                    await manager.send_personal_message({
+                                        "type": "emotions",
+                                        "payload": {
+                                            "summary": emotional_data.get('summary', {}),
+                                            "recent_traces": emotional_data.get('recent_traces', [])[-3:]  # Last 3
+                                        }
+                                    }, websocket)
+                                    last_emotions_hash = current_hash
+                            
+                            # 4. Send learned rules updates (if new rules)
+                            rules_data = _state_store.get_learned_rules_data()
+                            if rules_data:
+                                current_rules_count = rules_data.get('total_rules', 0)
+                                if current_rules_count > last_rules_count:
+                                    new_rules = rules_data.get('rules', [])[-3:]  # Last 3 new rules
+                                    if new_rules:
+                                        await manager.send_personal_message({
+                                            "type": "rules",
+                                            "payload": {
+                                                "new_rules": new_rules,
+                                                "total_rules": current_rules_count
+                                            }
+                                        }, websocket)
+                                    last_rules_count = current_rules_count
+                            
+                            # 5. Send district updates (if changed - includes tension, intent, pressure, resources, psychology)
+                            current_state = _state_store.get_state()
+                            if current_state and current_state.districts:
+                                # Create hash from all district data to detect any changes
+                                districts_data = {
+                                    d.get('id'): {
+                                        'tension_multi': d.get('tension_multi'),
+                                        'intent': d.get('intent'),
+                                        'pressure': d.get('pressure'),
+                                        'resources': d.get('resources'),
+                                        'psychology': d.get('psychology'),
+                                        'tension_trend': d.get('tension_trend')
+                                    }
+                                    for d in current_state.districts
+                                }
+                                current_districts_hash = hash_data(districts_data)
+                                if current_districts_hash != last_districts_hash:
+                                    await manager.send_personal_message({
+                                        "type": "districts",
+                                        "payload": {
+                                            "districts": [
+                                                {
+                                                    "id": d.get('id'),
+                                                    "name": d.get('name'),
+                                                    "tension": d.get('tension'),  # Legacy single tension
+                                                    "tension_multi": d.get('tension_multi'),  # Multi-dimensional tension
+                                                    "tension_trend": d.get('tension_trend'),
+                                                    "intent": d.get('intent'),
+                                                    "pressure": d.get('pressure'),  # Food, jobs, weather, migration, rumor, inequality
+                                                    "resources": d.get('resources'),  # Food stock, jobs available
+                                                    "psychology": d.get('psychology'),  # Trust, trauma, fatigue
+                                                    "risk_flags": d.get('risk_flags', []),  # Risk indicators
+                                                    "recent_events": d.get('recent_events', [])[-3:]  # Last 3 events
+                                                }
+                                                for d in current_state.districts
+                                            ]
+                                        }
+                                    }, websocket)
+                                    last_districts_hash = current_districts_hash
+                            
+                            # 6. Send agent updates (if changed - intent, relationships)
+                            if current_state and current_state.agents:
+                                agents_data = {
+                                    a.get('id'): {
+                                        'intent': a.get('intent'),
+                                        'relationships': a.get('relationships')
+                                    }
+                                    for a in current_state.agents
+                                }
+                                current_agents_hash = hash_data(agents_data)
+                                if current_agents_hash != last_agents_hash:
+                                    await manager.send_personal_message({
+                                        "type": "agents",
+                                        "payload": {
+                                            "agents": [
+                                                {
+                                                    "id": a.get('id'),
+                                                    "name": a.get('name'),
+                                                    "intent": a.get('intent'),
+                                                    "relationships": a.get('relationships')
+                                                }
+                                                for a in current_state.agents[:10]  # Limit to first 10 for size
+                                            ]
+                                        }
+                                    }, websocket)
+                                    last_agents_hash = current_agents_hash
+                            
+                            last_update_send_time = current_time
+                            
+                        except Exception as e:
+                            # Connection closed or error, break out
+                            print(f"WebSocket update error: {e}")
+                            return
                 
                 except Exception as e:
                     # Continue on error (connection might be closed)

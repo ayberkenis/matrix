@@ -1,0 +1,320 @@
+{
+	"info": {
+		"_postman_id": "living-matrix-api-001",
+		"name": "Living Matrix API",
+		"description": "Complete API collection for Living Matrix simulation including REST endpoints and WebSocket",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health & Version",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/health",
+							"host": ["{{base_url}}"],
+							"path": ["health"]
+						},
+						"description": "Check if the world is initialized and running"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Version",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/version",
+							"host": ["{{base_url}}"],
+							"path": ["version"]
+						},
+						"description": "Get version information including matrix version, creation date, reset count"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "State & World",
+			"item": [
+				{
+					"name": "Get World State",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/state",
+							"host": ["{{base_url}}"],
+							"path": ["state"]
+						},
+						"description": "Get world state summary with turn, day, time, weather, economy"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Events",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/events?limit=50",
+							"host": ["{{base_url}}"],
+							"path": ["events"],
+							"query": [
+								{
+									"key": "limit",
+									"value": "50",
+									"description": "Number of events to return"
+								}
+							]
+						},
+						"description": "Get recent events from the world"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Agents",
+			"item": [
+				{
+					"name": "Get All Agents",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/agents",
+							"host": ["{{base_url}}"],
+							"path": ["agents"]
+						},
+						"description": "Get all agents in the world"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Agent by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/agents/agent_5",
+							"host": ["{{base_url}}"],
+							"path": ["agents", "agent_5"]
+						},
+						"description": "Get specific agent by ID"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Districts",
+			"item": [
+				{
+					"name": "Get All Districts",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/districts",
+							"host": ["{{base_url}}"],
+							"path": ["districts"]
+						},
+						"description": "Get all districts with economy stats, tension, intent, pressure, resources, psychology"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Control",
+			"item": [
+				{
+					"name": "Pause Simulation",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": ""
+						},
+						"url": {
+							"raw": "{{base_url}}/control/pause",
+							"host": ["{{base_url}}"],
+							"path": ["control", "pause"]
+						},
+						"description": "Pause the simulation"
+					},
+					"response": []
+				},
+				{
+					"name": "Resume Simulation",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": ""
+						},
+						"url": {
+							"raw": "{{base_url}}/control/resume",
+							"host": ["{{base_url}}"],
+							"path": ["control", "resume"]
+						},
+						"description": "Resume the simulation"
+					},
+					"response": []
+				},
+				{
+					"name": "Set Simulation Speed",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"ms\": 50\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{base_url}}/control/speed",
+							"host": ["{{base_url}}"],
+							"path": ["control", "speed"]
+						},
+						"description": "Set simulation speed in milliseconds (10-1000ms)"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "World AI Systems",
+			"item": [
+				{
+					"name": "Get Causality Records",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/world/causality?limit=50",
+							"host": ["{{base_url}}"],
+							"path": ["world", "causality"],
+							"query": [
+								{
+									"key": "limit",
+									"value": "50",
+									"description": "Number of records to return"
+								}
+							]
+						},
+						"description": "Get recent causal records from the causality system"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Emotional Memory",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/world/emotions",
+							"host": ["{{base_url}}"],
+							"path": ["world", "emotions"]
+						},
+						"description": "Get emotional memory summary and recent traces"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Learned Rules",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/world/rules",
+							"host": ["{{base_url}}"],
+							"path": ["world", "rules"]
+						},
+						"description": "Get learned rules from the system"
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "WebSocket",
+			"item": [
+				{
+					"name": "WebSocket Connection",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{ws_url}}/ws",
+							"protocol": "ws",
+							"host": ["{{ws_url}}"],
+							"path": ["ws"]
+						},
+						"description": "WebSocket connection for real-time updates. Sends: state, event, causality, emotions, rules, districts, agents updates"
+					},
+					"response": []
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:8000",
+			"type": "string"
+		},
+		{
+			"key": "ws_url",
+			"value": "ws://localhost:8000",
+			"type": "string"
+		}
+	]
+}
