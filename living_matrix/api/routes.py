@@ -10,17 +10,30 @@ router = APIRouter()
 # These will be set by app.py after initialization
 _state_store: MatrixStateStore = None
 _command_queue: MatrixCommandQueue = None
+_version_manager = None
 
 
-def set_dependencies(state_store: MatrixStateStore, command_queue: MatrixCommandQueue):
+def set_dependencies(state_store: MatrixStateStore, command_queue: MatrixCommandQueue, version_manager=None):
     """Set the state store and command queue (called from app.py after initialization)."""
-    global _state_store, _command_queue
+    global _state_store, _command_queue, _version_manager
     _state_store = state_store
     _command_queue = command_queue
+    _version_manager = version_manager
 
 
 def setup_routes():
     """Setup routes (uses global state_store and command_queue)."""
+    
+    @router.get("/version")
+    async def get_version():
+        """Get version information."""
+        global _version_manager
+        if _version_manager is None:
+            # Fallback if version manager not initialized
+            from living_matrix.version import VersionManager
+            _version_manager = VersionManager(data_dir="data")
+            _version_manager.load()
+        return _version_manager.get_info()
     
     @router.get("/health")
     async def health():
@@ -36,14 +49,14 @@ def setup_routes():
     
     @router.get("/state")
     async def get_state():
-        """Get world state summary."""
+        """Get world state summary with enhanced data."""
         if _state_store is None:
             raise HTTPException(status_code=503, detail="World not initialized")
         state = _state_store.get_state()
         if not state:
             raise HTTPException(status_code=503, detail="World not initialized")
         
-        return {
+        response = {
             "turn": state.turn,
             "day": state.day,
             "time": state.time,
@@ -51,6 +64,12 @@ def setup_routes():
             "economy": state.economy,
             "timestamp": state.timestamp
         }
+        
+        # Add detailed weather if available
+        if hasattr(state, 'weather_detail') and state.weather_detail:
+            response["weather"] = state.weather_detail
+        
+        return response
     
     @router.get("/agents")
     async def get_agents():

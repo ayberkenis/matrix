@@ -20,6 +20,7 @@ class MatrixState:
     events: List[Dict[str, Any]]
     economy: Dict[str, Any]
     timestamp: str
+    weather_detail: Optional[Dict[str, Any]] = None  # Detailed weather info
 
 
 @dataclass

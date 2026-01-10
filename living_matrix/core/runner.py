@@ -11,7 +11,7 @@ from living_matrix.core.ipc import MatrixStateStore, MatrixCommandQueue, MatrixS
 class WorldRunner:
     """Runs Living Matrix world simulation in background."""
     
-    def __init__(self, simulation, state_store: MatrixStateStore, command_queue: MatrixCommandQueue):
+    def __init__(self, simulation, state_store: MatrixStateStore, command_queue: MatrixCommandQueue, version_manager=None):
         """
         Initialize world runner.
         
@@ -19,10 +19,12 @@ class WorldRunner:
             simulation: Simulation instance
             state_store: State store for snapshots
             command_queue: Command queue for API commands
+            version_manager: Optional version manager for tracking resets
         """
         self.simulation = simulation
         self.state_store = state_store
         self.command_queue = command_queue
+        self.version_manager = version_manager
         
         self.running = False
         self.paused = False
@@ -103,6 +105,9 @@ class WorldRunner:
         elif command.command == "reset":
             # Reset simulation (reinitialize)
             self.simulation.initialize()
+            # Mark reset in version manager if available
+            if self.version_manager:
+                self.version_manager.mark_reset()
         elif command.command == "inject_event":
             # Future: inject custom event
             pass
@@ -129,25 +134,82 @@ class WorldRunner:
             day = sim.time_system.day_index
             time_str = sim.time_system.format_time()
         
-        # Get weather
+        # Get weather (detailed)
         weather_str = "Unknown"
+        weather_detail = None
         if sim.weather_system:
             weather_str = sim.weather_system.format_weather_line()
+            # Get detailed weather for first region
+            if sim.world_map and sim.world_map.regions:
+                first_region_id = list(sim.world_map.regions.keys())[0]
+                weather_snapshot = sim.weather_system.snapshot(first_region_id)
+                if weather_snapshot:
+                    weather_detail = {
+                        "sky": weather_snapshot.sky if hasattr(weather_snapshot, 'sky') else "unknown",
+                        "wind": weather_snapshot.wind if hasattr(weather_snapshot, 'wind') else "unknown",
+                        "precipitation": weather_snapshot.precipitation if hasattr(weather_snapshot, 'precipitation') else "unknown",
+                        "temperature": weather_snapshot.temperature if hasattr(weather_snapshot, 'temperature') else "unknown"
+                    }
         
-        # Get districts
+        # Get districts (use world_dynamics if available, fallback to economy)
         districts = []
-        if sim.world_map and sim.economy_system:
-            for district_id, region in sim.world_map.regions.items():
-                economy = sim.economy_system.get_district(district_id)
-                if economy:
-                    districts.append({
-                        "id": district_id,
-                        "name": economy.district_name,
-                        "food_stock": economy.food_stock,
-                        "tension": economy.tension,
-                        "jobs_available": economy.jobs_available,
-                        "scarcity": economy.scarcity
-                    })
+        if sim.world_map:
+            # Check if world_dynamics_system exists
+            world_dynamics = getattr(sim, 'world_dynamics_system', None)
+            
+            if world_dynamics:
+                # Use advanced world dynamics
+                for district_id, region in sim.world_map.regions.items():
+                    district = world_dynamics.get_district(district_id)
+                    if district:
+                        # Get neighboring districts
+                        neighbor_ids = [r_id for r_id in sim.world_map.regions.keys() if r_id != district_id]
+                        
+                        districts.append({
+                            "id": district_id,
+                            "name": district.district_name,
+                            "tension": round(district.tension_state.tension, 1),
+                            "tension_trend": world_dynamics.get_tension_trend(district_id),
+                            "pressure": {
+                                "food": round(district.pressure.food, 2),
+                                "jobs": round(district.pressure.jobs, 2),
+                                "weather": round(district.pressure.weather, 2),
+                                "migration": round(district.pressure.migration, 2),
+                                "rumor": round(district.pressure.rumor, 2),
+                                "inequality": round(district.pressure.inequality, 2)
+                            },
+                            "resources": {
+                                "food_stock": round(district.food_stock, 1),
+                                "jobs_available": district.jobs_available
+                            },
+                            "psychology": {
+                                "trust": round(district.psychology.trust_score, 2),
+                                "trauma": round(district.psychology.trauma_score, 2),
+                                "fatigue": round(district.psychology.fatigue_score, 2)
+                            },
+                            "recent_events": [
+                                {
+                                    "type": e.get("type", "unknown"),
+                                    "severity": e.get("severity", 0.0),
+                                    "turn": e.get("turn", 0)
+                                }
+                                for e in list(district.psychology.recent_events)[-5:]
+                            ],
+                            "risk_flags": world_dynamics.get_risk_flags(district_id)
+                        })
+            elif sim.economy_system:
+                # Fallback to old economy system
+                for district_id, region in sim.world_map.regions.items():
+                    economy = sim.economy_system.get_district(district_id)
+                    if economy:
+                        districts.append({
+                            "id": district_id,
+                            "name": economy.district_name,
+                            "food_stock": economy.food_stock,
+                            "tension": economy.tension,
+                            "jobs_available": economy.jobs_available,
+                            "scarcity": economy.scarcity
+                        })
         
         # Get agents
         agents = []
@@ -187,9 +249,59 @@ class WorldRunner:
                         "type": event_tuple[2] if len(event_tuple) > 2 else None
                     })
         
-        # Get economy summary
+        # Get economy/world summary
         economy = {}
-        if sim.economy_system:
+        world_dynamics = getattr(sim, 'world_dynamics_system', None)
+        
+        if world_dynamics:
+            districts_list = world_dynamics.get_all_districts()
+            total_food = sum(d.food_stock for d in districts_list)
+            total_credits = sum(d.credits_pool for d in districts_list)
+            avg_tension = sum(d.tension_state.tension for d in districts_list) / len(districts_list) if districts_list else 0
+            
+            # Get hotspots (top 3 by tension)
+            hotspots = sorted(
+                [(d.district_name, d.tension_state.tension) for d in districts_list],
+                key=lambda x: x[1],
+                reverse=True
+            )[:3]
+            
+            # Get active events
+            active_event_types = set()
+            for d in districts_list:
+                for event in d.active_events:
+                    active_event_types.add(event.event_type.value)
+            
+            # System health
+            high_tension_count = sum(1 for d in districts_list if d.tension_state.tension > 85)
+            if high_tension_count >= len(districts_list) * 0.7:
+                stability = "degrading"
+                risk_level = "critical"
+            elif high_tension_count >= len(districts_list) * 0.4:
+                stability = "degrading"
+                risk_level = "high"
+            elif high_tension_count > 0:
+                stability = "stable"
+                risk_level = "moderate"
+            else:
+                stability = "recovering"
+                risk_level = "low"
+            
+            economy = {
+                "total_food": round(total_food, 1),
+                "total_credits": round(total_credits, 1),
+                "average_tension": round(avg_tension, 1),
+                "global_tension_index": round(avg_tension / 100.0, 2),
+                "district_count": len(districts_list),
+                "hotspots": [{"district": name, "tension": round(t, 1)} for name, t in hotspots],
+                "active_events": list(active_event_types),
+                "system_health": {
+                    "stability": stability,
+                    "risk_level": risk_level
+                }
+            }
+        elif sim.economy_system:
+            # Fallback to old economy system
             districts_list = sim.economy_system.get_all_districts()
             total_food = sum(d.food_stock for d in districts_list)
             total_credits = sum(d.credits_pool for d in districts_list)
@@ -204,14 +316,33 @@ class WorldRunner:
                 "district_count": len(districts_list)
             }
         
+        # Build state with enhanced data
+        state_data = {
+            "turn": sim.world.state.turn,
+            "day": day,
+            "time": time_str,
+            "weather": weather_str,
+            "districts": districts,
+            "agents": agents,
+            "events": events,
+            "economy": economy,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Add detailed weather if available
+        if weather_detail:
+            state_data["weather_detail"] = weather_detail
+        
+        # Create MatrixState (handle optional weather_detail)
         return MatrixState(
-            turn=sim.world.state.turn,
-            day=day,
-            time=time_str,
-            weather=weather_str,
-            districts=districts,
-            agents=agents,
-            events=events,
-            economy=economy,
-            timestamp=datetime.now().isoformat()
+            turn=state_data["turn"],
+            day=state_data["day"],
+            time=state_data["time"],
+            weather=state_data["weather"],
+            districts=state_data["districts"],
+            agents=state_data["agents"],
+            events=state_data["events"],
+            economy=state_data["economy"],
+            timestamp=state_data["timestamp"],
+            weather_detail=state_data.get("weather_detail")
         )

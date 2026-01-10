@@ -52,6 +52,7 @@ class Simulation:
         # New systems
         self.human_agent_system: Optional[HumanAgentSystem] = None
         self.economy_system: Optional[EconomySystem] = None
+        self.world_dynamics_system = None  # Advanced world dynamics (replaces economy for tension/pressure)
         self.camera = Camera()
         self.ui_panels = UIPanels()
         
@@ -1183,19 +1184,66 @@ class Simulation:
         )
         
         # Advance economy and human agents per district
-        if self.economy_system and self.human_agent_system and self.world_map:
+        # Use world_dynamics_system if available, otherwise fallback to economy_system
+        if self.human_agent_system and self.world_map:
             all_human_events = []
+            use_advanced = self.world_dynamics_system is not None
+            
             for district_id, region in self.world_map.regions.items():
                 # Get agents in this district
                 district_agents = [a for a in self.human_agent_system.agents.values() 
                                  if a.district == district_id]
                 agent_count = len(district_agents)
                 
-                # Get district resources
-                district_resources = self.economy_system.get_district_resources(district_id)
+                # Get neighboring districts
+                neighbor_ids = [r_id for r_id in self.world_map.regions.keys() if r_id != district_id]
                 
-                # Advance economy
-                self.economy_system.advance(district_id, agent_count, [])
+                if use_advanced:
+                    # Use advanced world dynamics
+                    # Get weather state
+                    weather_state = {}
+                    if self.weather_system:
+                        weather_snap = self.weather_system.snapshot(district_id)
+                        if weather_snap:
+                            weather_state = {
+                                "precipitation": getattr(weather_snap, 'precipitation', 0),
+                                "wind": getattr(weather_snap, 'wind', 0),
+                                "temperature": getattr(weather_snap, 'temperature', 0)
+                            }
+                    
+                    # Advance world dynamics
+                    self.world_dynamics_system.advance(
+                        district_id, agent_count, weather_state, neighbor_ids, self.world.state.turn
+                    )
+                    
+                    # Get district resources from world dynamics
+                    district = self.world_dynamics_system.get_district(district_id)
+                    if district:
+                        district_resources = {
+                            "food_stock": district.food_stock,
+                            "credits_pool": district.credits_pool,
+                            "jobs_available": district.jobs_available,
+                            "security_level": district.security_level,
+                            "tension": district.tension_state.tension,
+                            "scarcity": district.pressure.food > 0.7  # Derived from pressure
+                        }
+                        
+                        # Collect events from active events
+                        for event in district.active_events:
+                            all_human_events.append(("world", 
+                                f"{event.event_type.value} in {district.district_name}", 
+                                event.event_type.value))
+                    else:
+                        district_resources = {"food_stock": 50, "credits_pool": 100, "jobs_available": 5, 
+                                            "security_level": 70, "tension": 20, "scarcity": False}
+                else:
+                    # Fallback to old economy system
+                    if self.economy_system:
+                        district_resources = self.economy_system.get_district_resources(district_id)
+                        self.economy_system.advance(district_id, agent_count, [])
+                    else:
+                        district_resources = {"food_stock": 50, "credits_pool": 100, "jobs_available": 5, 
+                                            "security_level": 70, "tension": 20, "scarcity": False}
                 
                 # Advance human agents
                 location_ids = [loc.id for loc in region.locations]
@@ -1204,14 +1252,15 @@ class Simulation:
                 )
                 all_human_events.extend(human_events)
                 
-                # Update economy tension with human events
-                event_descriptions = [e[1] for e in human_events]
-                self.economy_system.update_tension(district_id, event_descriptions)
-                
-                # Generate economy events
-                economy_events = self.economy_system.generate_events(district_id)
-                for evt in economy_events:
-                    all_human_events.append(("economy", evt, "economy"))
+                if not use_advanced and self.economy_system:
+                    # Update economy tension with human events
+                    event_descriptions = [e[1] for e in human_events]
+                    self.economy_system.update_tension(district_id, event_descriptions)
+                    
+                    # Generate economy events
+                    economy_events = self.economy_system.generate_events(district_id)
+                    for evt in economy_events:
+                        all_human_events.append(("economy", evt, "economy"))
             
             # Store human events for UI rendering
             self._last_human_events = all_human_events
