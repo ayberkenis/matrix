@@ -39,10 +39,6 @@ def age_child_pools(turn: int, child_pools: Dict[str, int],
             continue  # Skip aging this turn
         _child_aging_counter[district_id] = 0  # Reset counter
         
-        # Log before aging
-        before_ages = dict(child_cohorts[district_id])
-        print(f"[CHILD_AGING] District {district_id}: Aging {child_pools[district_id]} children, current ages: {before_ages}")
-        
         # Age cohorts probabilistically
         new_cohorts = {}
         for age_bucket, count in child_cohorts[district_id].items():
@@ -80,7 +76,3 @@ def age_child_pools(turn: int, child_pools: Dict[str, int],
         child_cohorts[district_id] = new_cohorts
         # Update total pool count
         child_pools[district_id] = sum(new_cohorts.values())
-        
-        # Log after aging
-        after_ages = dict(new_cohorts)
-        print(f"[CHILD_AGING] District {district_id}: After aging, {child_pools[district_id]} children, new ages: {after_ages}")

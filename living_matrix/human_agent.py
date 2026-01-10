@@ -773,9 +773,6 @@ class HumanAgentSystem:
         Advance all agents one tick.
         Returns list of (agent_id, description, event_type) tuples.
         """
-        # Always print to verify method is called
-        print(f"[HUMAN_AGENT_SYSTEM] advance() called: turn={turn}, agents={len(self.agents)}, district_resources={district_resources}")
-        
         events = []
         agents_list = [a for a in list(self.agents.values()) if a.is_alive]  # Only alive agents
         
@@ -824,10 +821,8 @@ class HumanAgentSystem:
         
         # Check for reproduction (POPULATION COMPRESSION: add to child pools, not agents)
         world_flags_system = getattr(self, '_world_flags_system', None)
-        print(f"[HUMAN_AGENT_SYSTEM] About to check reproduction: {len(agents_list)} alive agents")
         births = self._check_reproduction(agents_list, district_resources, turn, world_flags_system,
                                          extinction_risk, population_pressure, birth_pressure)
-        print(f"[HUMAN_AGENT_SYSTEM] Reproduction check returned {len(births)} births")
         for parent1_id, parent2_id in births:
             parent1 = self.agents.get(parent1_id)
             parent2 = self.agents.get(parent2_id)
@@ -838,11 +833,7 @@ class HumanAgentSystem:
                     events.append((parent1_id, f"Child born to {parent1.name} and {parent2.name} in {district}", "birth"))
         
         # POPULATION COMPRESSION: Age child pools statistically
-        global_child_pool_before = sum(self.child_pools.values())
-        print(f"[HUMAN_AGENT_SYSTEM] Before aging: {global_child_pool_before} children in pool")
         self._age_child_pools(turn)
-        global_child_pool_after_aging = sum(self.child_pools.values())
-        print(f"[HUMAN_AGENT_SYSTEM] After aging: {global_child_pool_after_aging} children in pool")
         
         # REQUIRED FIX 2: Emergency Birth Rule (Critical)
         # If adults exist but child_pool === 0, force reproduction
