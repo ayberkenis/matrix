@@ -14,6 +14,27 @@ Living Matrix is a terminal-based simulation that creates the impression of a "l
 
 4. **Autonomy (Internal Actors)**: Multiple internal agents (Archivist, Weaver, Gardener, Trickster, Cartographer) propose outputs each turn, with a coordinator selecting or blending proposals based on current drives.
 
+## Live Deployment
+
+**🌐 Live Demo**: [matrix.ayberkenis.com.tr](https://matrix.ayberkenis.com.tr)
+
+The Living Matrix is running live with a web interface. You can interact with it without needing to deploy anything yourself. The live deployment includes:
+
+- Full API access at `https://api.ayberkenis.com.tr/matrix`
+- WebSocket connection at `wss://api.ayberkenis.com.tr/matrix/ws`
+- Real-time world simulation running 24/7
+- All advanced AI systems (intent, causality, emotions, rules)
+
+**Frontend Repository**: [matrix-ui](https://github.com/ayberkenis/matrix-ui)
+
+The frontend is a Next.js application that provides a Matrix-themed control room interface with:
+
+- Real-time dashboard with WebSocket updates
+- District monitoring and tension visualization
+- Agent tracking and relationship graphs
+- Event stream with live updates
+- Control panel for simulation management
+
 ## How to Run
 
 ### Terminal Mode (Original)
@@ -46,6 +67,98 @@ The API server provides:
 - Advanced AI system endpoints (causality, emotions, rules)
 - Version tracking
 - Control endpoints (pause/resume/speed) when `MATRIX_DEBUG=true`
+
+### Docker Deployment
+
+The project includes a Dockerfile for easy containerized deployment.
+
+#### Quick Start
+
+```bash
+# Build the Docker image
+docker build -t living-matrix .
+
+# Run the container
+docker run -d \
+  --name living-matrix \
+  -p 8000:8000 \
+  -v $(pwd)/data:/app/data \
+  living-matrix
+```
+
+#### With Debug Mode
+
+```bash
+# Run with debug mode enabled (enables control endpoints)
+docker run -d \
+  --name living-matrix \
+  -p 8000:8000 \
+  -e MATRIX_DEBUG=true \
+  -v $(pwd)/data:/app/data \
+  living-matrix
+```
+
+#### Docker Compose (Recommended)
+
+Create a `docker-compose.yml`:
+
+```yaml
+version: "3.8"
+
+services:
+  living-matrix:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - MATRIX_DEBUG=false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+```
+
+Then run:
+
+```bash
+# Start the service
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop the service
+docker-compose down
+```
+
+#### Docker Environment Variables
+
+- `MATRIX_DEBUG` - Set to `true` to enable control endpoints (default: `false`)
+- Data is persisted in the `./data` volume mount
+
+#### Production Deployment
+
+For production deployment:
+
+```bash
+# Build for production
+docker build -t living-matrix:latest .
+
+# Run with production settings
+docker run -d \
+  --name living-matrix \
+  -p 8000:8000 \
+  -v /path/to/data:/app/data \
+  -e MATRIX_DEBUG=false \
+  --restart unless-stopped \
+  living-matrix:latest
+```
+
+**Note**: The Dockerfile runs the FastAPI server on port 8000. Make sure to map this port when running the container.
 
 ## Commands
 
@@ -594,6 +707,60 @@ Tests now verify:
 - Artifact processing with reduced weights
 - Drive smoothing prevents extremes
 - Determinism under fixed seed
+
+## Frontend Integration
+
+The Living Matrix backend can be used with the official frontend:
+
+**Frontend Repository**: [matrix-ui](https://github.com/ayberkenis/matrix-ui)
+
+**Live Demo**: [matrix.ayberkenis.com.tr](https://matrix.ayberkenis.com.tr)
+
+The frontend is a Next.js application that provides:
+
+- Real-time dashboard with WebSocket connection
+- Matrix-themed UI with dark green aesthetic
+- District monitoring with tension visualization
+- Agent tracking with relationship graphs
+- Live event stream
+- Control panel for simulation management
+
+### Using the Frontend Locally
+
+1. Clone the frontend repository:
+
+   ```bash
+   git clone https://github.com/ayberkenis/matrix-ui.git
+   cd matrix-ui
+   ```
+
+2. Install dependencies:
+
+   ```bash
+   npm install
+   ```
+
+3. Configure API URL (create `.env.local`):
+
+   ```env
+   # For local backend
+   NEXT_PUBLIC_MATRIX_API_URL=http://localhost:8000
+   NEXT_PUBLIC_MATRIX_WS_URL=ws://localhost:8000
+
+   # Or use live deployment
+   # NEXT_PUBLIC_MATRIX_API_URL=https://api.ayberkenis.com.tr/matrix
+   # NEXT_PUBLIC_MATRIX_WS_URL=wss://api.ayberkenis.com.tr/matrix/ws
+   ```
+
+4. Run the frontend:
+
+   ```bash
+   npm run dev
+   ```
+
+5. Open [http://localhost:3000](http://localhost:3000)
+
+The frontend will automatically connect to your local API server or the live deployment at [matrix.ayberkenis.com.tr](https://matrix.ayberkenis.com.tr).
 
 ## License
 
