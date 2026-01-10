@@ -62,11 +62,23 @@ class Simulation:
         from living_matrix.entropy import EntropySystem
         from living_matrix.world_pressure import WorldPressureSystem
         
+        # New systems: World Flags, Beliefs, Escalation, Culture
+        from living_matrix.world_flags import WorldFlagsSystem
+        from living_matrix.escalation import EscalationSystem
+        
         self.causality_system = CausalitySystem()
         self.emotional_memory = EmotionalMemory()
         self.learned_rules = LearnedRulesSystem()
         self.entropy_system = EntropySystem(seed=self.world.state.seed if self.world.state else 42)
         self.world_pressure_system = WorldPressureSystem()
+        
+        # New systems
+        self.world_flags_system = WorldFlagsSystem(seed=self.world.state.seed if self.world.state else 42)
+        self.escalation_system = EscalationSystem(seed=self.world.state.seed if self.world.state else 42)
+        
+        # Link world_flags_system to world_dynamics for event generation
+        if self.world_dynamics_system:
+            self.world_dynamics_system._world_flags_system = self.world_flags_system
         
         # Observation effect tracking
         self.observation_count = 0
@@ -117,6 +129,11 @@ class Simulation:
                 )
             if not self.economy_system:
                 self.economy_system = EconomySystem(districts=district_ids, seed=self.world.state.seed)
+            if not self.world_dynamics_system:
+                from living_matrix.world_dynamics import WorldDynamicsSystem
+                self.world_dynamics_system = WorldDynamicsSystem(districts=district_ids, seed=self.world.state.seed)
+                # Link world_flags_system to world_dynamics for event generation
+                self.world_dynamics_system._world_flags_system = self.world_flags_system
         else:
             # Create new world simulation
             self.time_system = TimeSystem(seed=self.world.state.seed)
@@ -142,6 +159,12 @@ class Simulation:
                 seed=self.world.state.seed
             )
             self.economy_system = EconomySystem(districts=district_ids, seed=self.world.state.seed)
+            
+            # Initialize world dynamics system (includes culture system)
+            from living_matrix.world_dynamics import WorldDynamicsSystem
+            self.world_dynamics_system = WorldDynamicsSystem(districts=district_ids, seed=self.world.state.seed)
+            # Link world_flags_system to world_dynamics for event generation
+            self.world_dynamics_system._world_flags_system = self.world_flags_system
     
     def process_command(self, line: str) -> bool:
         """
@@ -1327,6 +1350,117 @@ class Simulation:
                 self.entropy_system.adjust_entropy_rate(tension_factor)
             else:
                 self.entropy_system.reset_entropy_rate()
+        
+        # ===== NEW SYSTEMS: WORLD FLAGS, ESCALATION, BELIEFS, CULTURE =====
+        
+        # 9. Check for world flag triggers
+        if self.world_dynamics_system and self.world_flags_system:
+            districts_data = {}
+            for district_id in self.world_map.regions.keys():
+                district = self.world_dynamics_system.get_district(district_id)
+                if district:
+                    districts_data[district_id] = {
+                        "id": district_id,
+                        "food_stock": district.food_stock,
+                        "tension": district.tension_state.tension,
+                        "credits_pool": district.credits_pool,
+                        "jobs_available": district.jobs_available
+                    }
+            
+            newly_triggered_flags = self.world_flags_system.check_triggers(
+                self.world.state, districts_data
+            )
+            for flag in newly_triggered_flags:
+                logger.info(f"World flag triggered: {flag.id} at turn {turn}")
+        
+        # 10. Check and advance escalation chains
+        if self.world_dynamics_system and self.escalation_system:
+            districts_data = {}
+            for district_id in self.world_map.regions.keys():
+                district = self.world_dynamics_system.get_district(district_id)
+                if district:
+                    districts_data[district_id] = {
+                        "id": district_id,
+                        "food_stock": district.food_stock,
+                        "tension": district.tension_state.tension,
+                        "credits_pool": district.credits_pool,
+                        "jobs_available": district.jobs_available
+                    }
+            
+            # Check for new triggers
+            newly_triggered_chains = self.escalation_system.check_triggers(districts_data, turn)
+            
+            # Advance existing chains
+            transitions = self.escalation_system.advance_chains(
+                districts_data, turn, self.world_flags_system
+            )
+            for transition_msg in transitions:
+                logger.info(transition_msg)
+        
+        # 11. Update agent beliefs (decay and spread)
+        if self.human_agent_system:
+            for agent in self.human_agent_system.agents.values():
+                # Decay beliefs
+                for topic, belief in list(agent.beliefs.items()):
+                    self.human_agent_system.belief_system.decay_belief(belief, turn)
+                    if belief.confidence < 0.1:
+                        # Remove very weak beliefs
+                        del agent.beliefs[topic]
+                
+                # Belief spread during social interactions
+                if agent.current_action == "socialize":
+                    nearby_agents = [a for a in self.human_agent_system.agents.values()
+                                   if a.location == agent.location and a.id != agent.id]
+                    if nearby_agents:
+                        other = random.choice(nearby_agents)
+                        # Spread beliefs both ways
+                        for topic, belief in list(agent.beliefs.items()):
+                            self.human_agent_system.belief_system.spread_belief(
+                                belief, other.beliefs, turn
+                            )
+                        for topic, belief in list(other.beliefs.items()):
+                            self.human_agent_system.belief_system.spread_belief(
+                                belief, agent.beliefs, turn
+                            )
+                
+                # Form beliefs from events
+                for event_desc in list(agent.memory)[-3:]:
+                    if "conflict" in event_desc.lower() or "theft" in event_desc.lower():
+                        # Negative belief about location
+                        topic = f"{agent.location}_safety"
+                        belief = self.human_agent_system.belief_system.create_belief_from_experience(
+                            topic, -0.5, turn
+                        )
+                        agent.beliefs[topic] = belief
+                    elif "help" in event_desc.lower() or "trade" in event_desc.lower():
+                        # Positive belief
+                        topic = f"{agent.location}_trustworthiness"
+                        belief = self.human_agent_system.belief_system.create_belief_from_experience(
+                            topic, 0.5, turn
+                        )
+                        agent.beliefs[topic] = belief
+        
+        # 12. Apply culture effects to districts
+        if self.world_dynamics_system:
+            for district_id in self.world_map.regions.keys():
+                district = self.world_dynamics_system.get_district(district_id)
+                if district and district.culture:
+                    # Culture modifies escalation speed, cooperation, violence
+                    # (effects are applied in world_dynamics.advance via culture system)
+                    # Drift culture over time
+                    self.world_dynamics_system.culture_system.drift_culture(district_id)
+                    
+                    # Evolve culture from events
+                    for event in district.active_events:
+                        event_type_str = 'unknown'
+                        if hasattr(event, 'event_type'):
+                            if hasattr(event.event_type, 'value'):
+                                event_type_str = event.event_type.value
+                            else:
+                                event_type_str = str(event.event_type)
+                        self.world_dynamics_system.culture_system.evolve_from_events(
+                            district_id, event_type_str, event.severity
+                        )
         
         # Advance economy and human agents per district
         # Use world_dynamics_system if available, otherwise fallback to economy_system

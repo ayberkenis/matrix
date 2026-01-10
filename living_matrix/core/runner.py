@@ -196,12 +196,18 @@ class WorldRunner:
                         if hasattr(district, 'intent'):
                             district_intent = district.intent.to_dict()
                         
+                        # Get district culture
+                        district_culture = None
+                        if hasattr(district, 'culture') and district.culture:
+                            district_culture = district.culture.to_dict()
+                        
                         districts.append({
                             "id": district_id,
                             "name": district.district_name,
                             "tension": round(district.tension_state.tension, 1),  # Legacy
                             "tension_multi": multi_tension,  # New multi-dimensional
                             "intent": district_intent,  # New intent
+                            "culture": district_culture,  # New culture
                             "tension_trend": world_dynamics.get_tension_trend(district_id),
                             "pressure": {
                                 "food": round(district.pressure.food, 2),
@@ -258,6 +264,14 @@ class WorldRunner:
                     if world_agent and hasattr(world_agent, 'intent'):
                         agent_intent = world_agent.intent.to_dict()
                 
+                # Get agent beliefs
+                agent_beliefs = {}
+                if hasattr(agent, 'beliefs'):
+                    agent_beliefs = {
+                        topic: belief.to_dict() 
+                        for topic, belief in agent.beliefs.items()
+                    }
+                
                 agents.append({
                     "id": agent.id,
                     "name": agent.name,
@@ -275,6 +289,7 @@ class WorldRunner:
                     "goals": agent.goals,
                     "current_action": agent.current_action,
                     "intent": agent_intent,  # New intent
+                    "beliefs": agent_beliefs,  # New beliefs
                     "inventory": {
                         "food": agent.inventory.food,
                         "credits": agent.inventory.credits,
@@ -421,3 +436,35 @@ class WorldRunner:
                 'total_rules': len(sim.learned_rules.rules)
             }
             self.state_store.set_learned_rules_data(rules_data)
+        
+        # Update world flags data
+        if hasattr(sim, 'world_flags_system'):
+            flags = sim.world_flags_system.get_all_flags()
+            flags_data = {
+                'flags': [f.to_dict() for f in flags],
+                'count': len(flags)
+            }
+            self.state_store.set_world_flags_data(flags_data)
+        
+        # Update escalation chains data
+        if hasattr(sim, 'escalation_system'):
+            active_chains = sim.escalation_system.get_active_chains()
+            all_chains = list(sim.escalation_system.chains.values())
+            escalation_data = {
+                'chains': [c.to_dict() for c in active_chains],
+                'active_count': len(active_chains),
+                'total_chains': len(all_chains)
+            }
+            self.state_store.set_escalation_data(escalation_data)
+        
+        # Update culture data
+        if hasattr(sim, 'world_dynamics_system') and hasattr(sim.world_dynamics_system, 'culture_system'):
+            cultures = {}
+            for district_id in sim.world_map.regions.keys() if sim.world_map else []:
+                culture = sim.world_dynamics_system.culture_system.get_culture(district_id)
+                if culture:
+                    cultures[district_id] = culture.to_dict()
+            culture_data = {
+                'cultures': cultures
+            }
+            self.state_store.set_culture_data(culture_data)

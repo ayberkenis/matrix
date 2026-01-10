@@ -109,6 +109,20 @@
 						"description": "Get specific agent by ID"
 					},
 					"response": []
+				},
+				{
+					"name": "Get Agent Beliefs",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/agents/human_0/beliefs",
+							"host": ["{{base_url}}"],
+							"path": ["agents", "human_0", "beliefs"]
+						},
+						"description": "Get beliefs for a specific agent (subjective reality)"
+					},
+					"response": []
 				}
 			]
 		},
@@ -126,6 +140,20 @@
 							"path": ["districts"]
 						},
 						"description": "Get all districts with economy stats, tension, intent, pressure, resources, psychology"
+					},
+					"response": []
+				},
+				{
+					"name": "Get District Culture",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/districts/region_kora/culture",
+							"host": ["{{base_url}}"],
+							"path": ["districts", "region_kora", "culture"]
+						},
+						"description": "Get culture and norms for a specific district (collectivism, obedience, aggression, risk_tolerance)"
 					},
 					"response": []
 				}
@@ -259,6 +287,34 @@
 							"path": ["world", "rules"]
 						},
 						"description": "Get learned rules from the system"
+					},
+					"response": []
+				},
+				{
+					"name": "Get World Flags",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/world/flags",
+							"host": ["{{base_url}}"],
+							"path": ["world", "flags"]
+						},
+						"description": "Get all triggered world flags (irreversible world states like kora_famine, rift_unrest, etc.)"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Escalation Chains",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/escalations",
+							"host": ["{{base_url}}"],
+							"path": ["escalations"]
+						},
+						"description": "Get all active escalation chains (progressive crisis chains like food_crisis, political_tension, economic_collapse)"
 					},
 					"response": []
 				}

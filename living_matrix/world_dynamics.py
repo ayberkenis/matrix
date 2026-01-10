@@ -7,6 +7,7 @@ from collections import deque
 from enum import Enum
 from living_matrix.tension import Tension as MultiTension
 from living_matrix.intent import Intent
+from living_matrix.culture import Culture, CultureSystem
 
 
 class EventType(Enum):
@@ -140,6 +141,9 @@ class AdvancedDistrict:
     # Migration tracking
     population_in: int = 0
     population_out: int = 0
+    
+    # Culture
+    culture: Culture = field(default_factory=lambda: Culture())
 
 
 class WorldDynamicsSystem:
@@ -151,6 +155,7 @@ class WorldDynamicsSystem:
         random.seed(seed)
         self.districts: Dict[str, AdvancedDistrict] = {}
         self.global_turn: int = 0
+        self.culture_system = CultureSystem(seed=seed)
         
         # Initialize districts
         for district_id in districts:
@@ -167,6 +172,9 @@ class WorldDynamicsSystem:
                 ideal_food=random.uniform(45, 55),
                 ideal_jobs=random.randint(6, 10)
             )
+            # Initialize culture for district
+            self.culture_system.initialize_district_culture(district_id)
+            district.culture = self.culture_system.get_culture(district_id)
             self.districts[district_id] = district
     
     def calculate_pressures(self, district_id: str, weather_state: Dict, 
@@ -299,7 +307,8 @@ class WorldDynamicsSystem:
         
         tension.last_turn = turn
     
-    def generate_events(self, district_id: str, turn: int, weather_state: Dict) -> List[WorldEvent]:
+    def generate_events(self, district_id: str, turn: int, weather_state: Dict, 
+                        world_flags_system=None) -> List[WorldEvent]:
         """Generate events based on district state."""
         if district_id not in self.districts:
             return []
@@ -314,7 +323,10 @@ class WorldDynamicsSystem:
         # TENSION INCREASING EVENTS
         
         # Food shortage wave
-        if district.pressure.food > 0.7 and random.random() < 0.15 * trauma_modifier:
+        base_prob = 0.15 * trauma_modifier
+        if world_flags_system:
+            base_prob = world_flags_system.modify_event_probability("food_shortage", base_prob)
+        if district.pressure.food > 0.7 and random.random() < base_prob:
             events.append(WorldEvent(
                 event_type=EventType.FOOD_SHORTAGE_WAVE,
                 district_id=district_id,
@@ -541,8 +553,9 @@ class WorldDynamicsSystem:
                 if release_event.duration > 0:
                     district.active_events.append(release_event)
         
-        # Generate new events
-        new_events = self.generate_events(district_id, turn, weather_state)
+        # Generate new events (pass world_flags_system if available)
+        world_flags_system = getattr(self, '_world_flags_system', None)
+        new_events = self.generate_events(district_id, turn, weather_state, world_flags_system)
         for event in new_events:
             self.apply_event(event)
             if event.duration > 0:

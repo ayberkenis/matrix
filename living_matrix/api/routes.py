@@ -235,4 +235,100 @@ def setup_routes(debug_mode: bool = False):
             "returned": len(rules_sorted)
         }
     
+    # New endpoints for World Flags, Escalation, Beliefs, Culture
+    @router.get("/world/flags")
+    async def get_world_flags():
+        """Get all triggered world flags."""
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        flags_data = _state_store.get_world_flags_data()
+        if not flags_data:
+            return {
+                "flags": [],
+                "count": 0,
+                "message": "World flags system not yet initialized"
+            }
+        
+        return {
+            "flags": flags_data.get('flags', []),
+            "count": flags_data.get('count', 0)
+        }
+    
+    @router.get("/escalations")
+    async def get_escalations():
+        """Get all active escalation chains."""
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        escalation_data = _state_store.get_escalation_data()
+        if not escalation_data:
+            return {
+                "chains": [],
+                "active_count": 0,
+                "message": "Escalation system not yet initialized"
+            }
+        
+        return {
+            "chains": escalation_data.get('chains', []),
+            "active_count": escalation_data.get('active_count', 0),
+            "total_chains": escalation_data.get('total_chains', 0)
+        }
+    
+    @router.get("/districts/{district_id}/culture")
+    async def get_district_culture(district_id: str):
+        """Get culture for a specific district."""
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        culture_data = _state_store.get_culture_data()
+        if not culture_data:
+            # Return default culture if system not yet initialized
+            return {
+                "district_id": district_id,
+                "culture": {
+                    "collectivism": 0.5,
+                    "obedience": 0.5,
+                    "aggression": 0.5,
+                    "risk_tolerance": 0.5
+                },
+                "message": "Culture system not yet initialized, returning default values"
+            }
+        
+        culture = culture_data.get('cultures', {}).get(district_id)
+        if not culture:
+            # Return default culture if district not found
+            return {
+                "district_id": district_id,
+                "culture": {
+                    "collectivism": 0.5,
+                    "obedience": 0.5,
+                    "aggression": 0.5,
+                    "risk_tolerance": 0.5
+                },
+                "message": f"Culture not found for district {district_id}, returning default values"
+            }
+        
+        return {
+            "district_id": district_id,
+            "culture": culture
+        }
+    
+    @router.get("/agents/{agent_id}/beliefs")
+    async def get_agent_beliefs(agent_id: str):
+        """Get beliefs for a specific agent."""
+        if _state_store is None:
+            raise HTTPException(status_code=503, detail="World not initialized")
+        
+        agent = _state_store.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+        
+        beliefs = agent.get('beliefs', {})
+        return {
+            "agent_id": agent_id,
+            "beliefs": beliefs,
+            "count": len(beliefs)
+        }
+    
     return router

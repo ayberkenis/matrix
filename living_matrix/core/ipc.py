@@ -168,6 +168,37 @@ class MatrixStateStore:
         """Get learned rules data (thread-safe)."""
         with self._lock:
             return getattr(self, '_learned_rules_data', None)
+    
+    # New systems data
+    def set_world_flags_data(self, flags_data: Dict[str, Any]):
+        """Set world flags data (thread-safe)."""
+        with self._lock:
+            self._world_flags_data = flags_data
+    
+    def get_world_flags_data(self) -> Optional[Dict[str, Any]]:
+        """Get world flags data (thread-safe)."""
+        with self._lock:
+            return getattr(self, '_world_flags_data', None)
+    
+    def set_escalation_data(self, escalation_data: Dict[str, Any]):
+        """Set escalation chains data (thread-safe)."""
+        with self._lock:
+            self._escalation_data = escalation_data
+    
+    def get_escalation_data(self) -> Optional[Dict[str, Any]]:
+        """Get escalation chains data (thread-safe)."""
+        with self._lock:
+            return getattr(self, '_escalation_data', None)
+    
+    def set_culture_data(self, culture_data: Dict[str, Any]):
+        """Set culture data (thread-safe)."""
+        with self._lock:
+            self._culture_data = culture_data
+    
+    def get_culture_data(self) -> Optional[Dict[str, Any]]:
+        """Get culture data (thread-safe)."""
+        with self._lock:
+            return getattr(self, '_culture_data', None)
 
 
 class MatrixCommandQueue:

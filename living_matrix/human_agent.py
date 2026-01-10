@@ -4,6 +4,7 @@ import random
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from collections import deque
+from living_matrix.beliefs import Belief, BeliefSystem
 
 
 @dataclass
@@ -54,6 +55,9 @@ class HumanAgent:
     # State
     current_action: str = "idle"
     last_action_turn: int = 0
+    
+    # Beliefs (subjective reality)
+    beliefs: Dict[str, Belief] = field(default_factory=dict)  # topic -> Belief
 
 
 class HumanAgentSystem:
@@ -69,6 +73,7 @@ class HumanAgentSystem:
         self.districts = districts  # District IDs (e.g., "region_kora")
         self.locations = locations
         self.agents: Dict[str, HumanAgent] = {}
+        self.belief_system = BeliefSystem(seed=seed)
         self._create_agents(num_agents)
     
     def _create_agents(self, num_agents: int):
