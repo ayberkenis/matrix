@@ -6,6 +6,9 @@ from typing import List, Dict, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from living_matrix.human_agent import HumanAgent
 
+# Performance optimization: limit pair checks to prevent O(n²) slowdown
+MAX_REPRODUCTION_PAIRS_TO_CHECK = 2000  # Limit pair checks per turn for performance
+
 
 def check_reproduction(agents: List['HumanAgent'], district_resources: Dict, 
                       turn: int, relationship_system, world_flags_system=None, 
@@ -52,6 +55,10 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
     import logging
     logger = logging.getLogger(__name__)
     
+    # OPTIMIZATION: Calculate population_count once
+    population_count = len([a for a in agents if a.is_alive])
+    survival_instinct = population_count < 20
+    
     if len(reproductive_agents) == 0:
         alive_agents = [a for a in agents if a.is_alive]
         all_ages = [int(a.age) for a in alive_agents]
@@ -69,13 +76,26 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
             in_window = 20 <= age_int <= lifespan_int - 20
             detail = f"  Agent {a.id}: age={age_int}, lifespan={lifespan_int}, in_window={in_window}, sex={getattr(a, 'sex', 'unknown')}"
             logger.warning(detail)
+        return births
+    
+    # OPTIMIZATION: Group agents by sex and location for faster pairing
+    # Separate by sex first (cheapest check)
+    males = [a for a in reproductive_agents if a.sex == 'male']
+    females = [a for a in reproductive_agents if a.sex == 'female']
+    
+    # OPTIMIZATION: If too many agents, sample to limit pair checks
+    # This prevents O(n²) slowdown with large populations
+    if len(males) * len(females) > MAX_REPRODUCTION_PAIRS_TO_CHECK:
+        # Sample agents to limit total pairs checked
+        max_agents_per_sex = int((MAX_REPRODUCTION_PAIRS_TO_CHECK / 2) ** 0.5) + 1
+        if len(males) > max_agents_per_sex:
+            males = random.sample(males, max_agents_per_sex)
+        if len(females) > max_agents_per_sex:
+            females = random.sample(females, max_agents_per_sex)
     
     # Log reproductive agents info
     if len(reproductive_agents) > 0:
-        sex_counts = {}
-        for a in reproductive_agents:
-            sex = getattr(a, 'sex', 'unknown')
-            sex_counts[sex] = sex_counts.get(sex, 0) + 1
+        sex_counts = {'male': len(males), 'female': len(females)}
         msg = f"Found {len(reproductive_agents)} reproductive agents, sex_dist: {sex_counts}"
         logger.debug(msg)
     
@@ -84,17 +104,19 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
     pairs_different_location = 0
     pairs_passed_checks = 0
     
-    for i, agent1 in enumerate(reproductive_agents):
-        for agent2 in reproductive_agents[i+1:]:
+    # OPTIMIZATION: Only check opposite-sex pairs (males x females)
+    # This reduces from O(n²) to O(m*f) where m= males, f=females
+    for agent1 in males:
+        # OPTIMIZATION: Early exit if we've checked too many pairs
+        if pairs_checked >= MAX_REPRODUCTION_PAIRS_TO_CHECK:
+            break
+        for agent2 in females:
+            # OPTIMIZATION: Early exit if we've checked too many pairs
+            if pairs_checked >= MAX_REPRODUCTION_PAIRS_TO_CHECK:
+                break
             pairs_checked += 1
             
-            # Must be at same location (relaxed - allow cross-location if population is low)
-            # CRITICAL FIX: With 20 agents spread across multiple districts, location requirement
-            # is blocking almost all reproduction. Allow cross-location reproduction when:
-            # 1. Population is low (< 20 for survival instinct)
-            # 2. Or if agents are in the same district (even if different specific locations)
-            population_count = len([a for a in agents if a.is_alive])
-            survival_instinct = population_count < 20
+            # OPTIMIZATION: Check location/district early (cheap checks before expensive relationship checks)
             same_district = getattr(agent1, 'district', None) == getattr(agent2, 'district', None)
             
             # Allow reproduction if: same location, same district, OR survival instinct active
@@ -102,14 +124,10 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
                 pairs_different_location += 1
                 continue
             
-            # Must be opposite sex (male-female pair required for reproduction)
-            if agent1.sex == agent2.sex:
-                pairs_same_sex += 1
-                continue
-            
             pairs_passed_checks += 1
             
-            # Check relationship - create if doesn't exist with good initial values
+            # OPTIMIZATION: Check relationship - create if doesn't exist with good initial values
+            # Use get() with default to avoid KeyError
             rel = agent1.relationships.get(agent2.id)
             if not rel:
                 # Create initial relationship with values that meet reproduction threshold
@@ -132,8 +150,7 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
             # 4. Birth pressure > 0.7 (social enforcement)
             # 5. SYSTEM A: must_attempt_reproduction flag (hard constraint)
             
-            population_count = len([a for a in agents if a.is_alive])
-            survival_instinct = population_count < 20  # If population is low, survival instinct kicks in
+            # OPTIMIZATION: population_count already calculated above
             can_reproduce_normal = relationship_system.can_reproduce(rel, food_available, tension, food_stock, population_count)
             extinction_panic = extinction_risk > 0.6
             legacy_drive_high = agent1.legacy_drive > 0.8 or agent2.legacy_drive > 0.8

@@ -1244,29 +1244,32 @@ class Simulation:
             print(f"[DEBUG] Top nodes: {', '.join(f'{t}({w:.1f})' for t, w in top_nodes)}")
             print()
         
-        # Display status and output (only if speaking)
+        # Display status and output (only if speaking and every 100 turns)
+        current_turn = state.turn - 1  # Use previous turn number (before increment)
         if should_speak:
-            print(format_status_line(
-                state.turn - 1,  # Use previous turn number (before increment)
-                state.drives,
-                diversity,
-                coherence,
-                novelty
-            ))
-            
-            if output_text:
-                print(format_output(output_text, agent_name))
-            else:
-                # Honest silence message
-                vocab_size = len(state.tensor_cognition.token_to_id) if state.tensor_cognition else 0
-                if vocab_size < 8:
-                    print("  (silence — internal motion without symbols)")
+            # Only print logs every 100 turns
+            if current_turn % 100 == 0:
+                print(format_status_line(
+                    current_turn,
+                    state.drives,
+                    diversity,
+                    coherence,
+                    novelty
+                ))
+                
+                if output_text:
+                    print(format_output(output_text, agent_name))
                 else:
-                    print("  (silence — no output generated)")
+                    # Honest silence message
+                    vocab_size = len(state.tensor_cognition.token_to_id) if state.tensor_cognition else 0
+                    if vocab_size < 8:
+                        print("  (silence — internal motion without symbols)")
+                    else:
+                        print("  (silence — no output generated)")
+                
+                print()
             
-            print()
-            
-            # Store in episodic memory (only if we spoke)
+            # Store in episodic memory (only if we spoke) - always store, not just every 100 turns
             user_input_str = user_input if user_input else ""
             notable = interaction_intensity > 0.5 or len(output_tokens) > 10
             state.episodic_memory.add(
