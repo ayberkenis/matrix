@@ -68,6 +68,7 @@ class HumanAgent:
     lifespan: int = 1000  # Randomized at birth (turns until death)
     is_alive: bool = True  # Whether agent is alive
     death_turn: Optional[int] = None  # Turn when agent died (None if alive)
+    death_cause: Optional[str] = None  # Cause of death: "aging", "starvation", "exhaustion", "extreme_weather"
     
     # Family relationships
     children_ids: List[str] = field(default_factory=list)

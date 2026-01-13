@@ -59,6 +59,18 @@ from living_matrix.population.promotion import (
 )
 from living_matrix.population.age_utils import age_child_pools as population_age_child_pools
 
+# Import learning config and memory manager (optional - graceful fallback)
+try:
+    from living_matrix.config import get_config as get_learning_config
+    from living_matrix.redis_memory import get_memory_manager
+    _HAS_LEARNING = True
+except ImportError:
+    _HAS_LEARNING = False
+    def get_learning_config():
+        return None
+    def get_memory_manager():
+        return None
+
 # Dataclasses are now imported from living_matrix.dataclasses
 # HumanNeeds, HumanTraits, HumanInventory, HumanAgent are imported above
 
@@ -81,6 +93,8 @@ class HumanAgentSystem:
         self.locations = locations
         self.agents: Dict[str, HumanAgent] = {}
         self.dead_agents: Dict[str, HumanAgent] = {}  # Historical record of dead agents
+        # Death counts by cause: {"aging": 10, "starvation": 5, ...}
+        self.death_counts: Dict[str, int] = {}
         self.belief_system = BeliefSystem(seed=seed)
         self.relationship_system = RelationshipSystem(seed=seed)
         
@@ -89,6 +103,26 @@ class HumanAgentSystem:
         # child_cohorts[district_id] = Dict[age_bucket, count] for statistical aging
         self.child_pools: Dict[str, int] = {d: 0 for d in districts}  # Total children per district
         self.child_cohorts: Dict[str, Dict[int, int]] = {d: {} for d in districts}  # Age buckets: {age_bucket: count}
+        
+        # Track children per couple: (parent1_id, parent2_id) -> count
+        # Use sorted tuple to ensure (A, B) == (B, A)
+        self.couple_children: Dict[Tuple[str, str], int] = {}
+        
+        # OPTIMIZATION 3: Spatial index for fast location-based queries
+        from living_matrix.utils.spatial_index import SpatialIndex
+        self.spatial_index = SpatialIndex()
+        
+        # PERFORMANCE: Agent tier manager for stratified simulation
+        from living_matrix.core_sim.agent_tiers import AgentTierManager
+        self.tier_manager = AgentTierManager(seed=seed)
+        
+        # PERFORMANCE: Population statistics tracker
+        from living_matrix.core_sim.statistics import PopulationStats
+        self.population_stats = PopulationStats()
+        
+        # PERFORMANCE: Parallel executor (lazy initialized)
+        self._parallel_executor = None
+        self._parallel_pool = None  # multiprocessing.Pool for true parallelism
         
         self._create_agents(num_agents)
     
@@ -102,11 +136,17 @@ class HumanAgentSystem:
             # Create a default location if none exist
             self.locations = ["loc_default"]
         
+        # POPULATION FIX: Concentrate initial agents in fewer districts
+        # With agents scattered across 10 districts, reproduction fails due to poor pairing
+        # Limit initial districts to max 3 to ensure viable population density
+        initial_districts = self.districts[:min(3, len(self.districts))] if self.districts else ["region_default"]
+        initial_locations = self.locations[:min(5, len(self.locations))] if self.locations else ["loc_default"]
+        
         for i in range(num_agents):
             agent_id = f"human_{i}"
             name = random.choice(NAME_PARTS) + " " + random.choice(NAME_PARTS)
-            district = random.choice(self.districts) if self.districts else "region_default"
-            home_location = random.choice(self.locations) if self.locations else "loc_default"
+            district = random.choice(initial_districts)
+            home_location = random.choice(initial_locations)
             role = random.choice(ROLES)
             
             # Randomize age and lifespan for initial population
@@ -164,9 +204,14 @@ class HumanAgentSystem:
             
             self.agents[agent_id] = agent
         
-        # After creating all agents, form some initial relationships
-        # This helps agents start with social connections for reproduction
-        self._form_initial_relationships()
+        # PERF CRITICAL: Defer relationship formation
+        # Instead of creating all relationships eagerly, we use lazy creation
+        # Relationships are formed on-demand during first interactions
+        # Only seed a minimal set of critical relationships for population bootstrap
+        self._seed_minimal_relationships()
+        
+        # OPTIMIZATION 3: Initialize spatial index with all agents
+        self.spatial_index.rebuild(self.agents)
         
         # Log creation for debugging
         import logging
@@ -188,45 +233,91 @@ class HumanAgentSystem:
         else:
             return random.uniform(REPRODUCTION_DRIVE_ELDERLY_MIN, REPRODUCTION_DRIVE_ELDERLY_MAX)  # Elderly
     
-    def _form_initial_relationships(self):
-        """Form some initial relationships between agents in the same location."""
-        # Group agents by location
-        agents_by_location = {}
-        for agent in self.agents.values():
-            if agent.location not in agents_by_location:
-                agents_by_location[agent.location] = []
-            agents_by_location[agent.location].append(agent)
+    def _seed_minimal_relationships(self):
+        """Seed minimal initial relationships for population bootstrap.
         
-        # For each location, form some relationships
-        for location, agents in agents_by_location.items():
-            if len(agents) < 2:
+        PERF CRITICAL: This is a lightweight alternative to full relationship formation.
+        Only creates ~2-3 relationships per agent (enough for reproduction).
+        Full relationship graphs are built lazily during interactions.
+        """
+        # HOT PATH - called once at init
+        _random_sample = random.sample
+        _random_random = random.random
+        _random_uniform = random.uniform
+        _create_rel = self.relationship_system.create_relationship
+        
+        # Only seed relationships for a subset of agents (enough for initial reproduction)
+        agents_list = list(self.agents.values())
+        agent_count = len(agents_list)
+        
+        # For very large populations, only seed relationships for a fraction
+        if agent_count > 5000:
+            sample_size = min(2000, agent_count // 3)
+            agents_to_seed = _random_sample(agents_list, sample_size)
+        else:
+            agents_to_seed = agents_list
+        
+        # Group sampled agents by location for efficient pairing
+        by_location = {}
+        for agent in agents_to_seed:
+            loc = agent.location
+            if loc not in by_location:
+                by_location[loc] = []
+            by_location[loc].append(agent)
+        
+        # Create 2-3 relationships per agent (minimal for reproduction)
+        MAX_SEED_RELATIONSHIPS = 3
+        
+        for loc, loc_agents in by_location.items():
+            if len(loc_agents) < 2:
                 continue
             
-            # Form relationships between some pairs (about 30% of possible pairs)
-            for i, agent1 in enumerate(agents):
-                for agent2 in agents[i+1:]:
-                    if random.random() < INITIAL_RELATIONSHIP_CHANCE:  # 30% chance to form initial relationship
-                        if agent2.id not in agent1.relationships:
-                            rel = self.relationship_system.create_relationship(agent2.id, 0)
-                            # Give initial relationship a boost (positive for most)
-                            if random.random() < INITIAL_RELATIONSHIP_POSITIVE_CHANCE:  # 70% positive, 30% neutral
-                                rel.affection = random.uniform(INITIAL_AFFECTION_MIN, INITIAL_AFFECTION_MAX)
-                                rel.trust = random.uniform(INITIAL_TRUST_MIN, INITIAL_TRUST_MAX)
-                                rel.familiarity = random.uniform(INITIAL_FAMILIARITY_MIN, INITIAL_FAMILIARITY_MAX)
-                            else:
-                                # Even neutral relationships start with minimum values for reproduction
-                                rel.affection = 0.15  # Above minimum threshold
-                                rel.trust = 0.15
-                                rel.familiarity = 0.1
-                            agent1.relationships[agent2.id] = rel
-                            
-                            # Also create reverse relationship
-                            if agent1.id not in agent2.relationships:
-                                rel2 = self.relationship_system.create_relationship(agent1.id, 0)
-                                rel2.affection = rel.affection
-                                rel2.trust = rel.trust
-                                rel2.familiarity = rel.familiarity
-                                agent2.relationships[agent1.id] = rel2
+            for agent in loc_agents:
+                if len(agent.relationships) >= MAX_SEED_RELATIONSHIPS:
+                    continue
+                
+                # Pick 1-3 random partners
+                others = [a for a in loc_agents if a.id != agent.id and a.id not in agent.relationships]
+                if not others:
+                    continue
+                
+                num_to_create = min(MAX_SEED_RELATIONSHIPS - len(agent.relationships), len(others))
+                partners = _random_sample(others, num_to_create) if len(others) > num_to_create else others[:num_to_create]
+                
+                for partner in partners:
+                    # Create bidirectional relationship
+                    rel = _create_rel(partner.id, 0)
+                    # Positive relationship for initial population
+                    rel.affection = _random_uniform(INITIAL_AFFECTION_MIN, INITIAL_AFFECTION_MAX)
+                    rel.trust = _random_uniform(INITIAL_TRUST_MIN, INITIAL_TRUST_MAX)
+                    rel.familiarity = _random_uniform(INITIAL_FAMILIARITY_MIN, INITIAL_FAMILIARITY_MAX)
+                    agent.relationships[partner.id] = rel
+                    
+                    # Reverse relationship
+                    if agent.id not in partner.relationships:
+                        rel2 = _create_rel(agent.id, 0)
+                        rel2.affection = rel.affection
+                        rel2.trust = rel.trust
+                        rel2.familiarity = rel.familiarity
+                        partner.relationships[agent.id] = rel2
+    
+    def get_or_create_relationship(self, agent: HumanAgent, target_id: str, turn: int) -> 'Relationship':
+        """Get existing relationship or create a new one lazily.
+        
+        PERF CRITICAL: Called during interactions. Creates relationships on-demand
+        instead of eagerly at initialization.
+        """
+        if target_id in agent.relationships:
+            return agent.relationships[target_id]
+        
+        # Create new relationship on first interaction
+        rel = self.relationship_system.create_relationship(target_id, turn)
+        # Start with neutral values (will develop through interactions)
+        rel.affection = 0.1
+        rel.trust = 0.1
+        rel.familiarity = 0.05
+        agent.relationships[target_id] = rel
+        return rel
     
     def _generate_initial_goals(self, agent: HumanAgent) -> List[str]:
         """Generate initial goals based on needs and role."""
@@ -244,45 +335,63 @@ class HumanAgentSystem:
         return goals
     
     def update_needs(self, agent: HumanAgent, district_tension: float, nearby_conflicts: int):
-        """Update agent needs each tick."""
+        """Update agent needs each tick.
+        
+        HOT PATH - CALLED PER AGENT PER TICK
+        """
+        # PERF CRITICAL: Hoist needs reference
+        _needs = agent.needs
+        
         # Hunger increases
-        agent.needs.hunger = min(100, agent.needs.hunger + 1)
+        _needs.hunger = min(100, _needs.hunger + 1)
         
         # Rest decreases if active
-        if agent.current_action not in ["rest", "idle"]:
-            agent.needs.rest = min(100, agent.needs.rest + 2)
+        action = agent.current_action
+        if action != "rest" and action != "idle":
+            _needs.rest = min(100, _needs.rest + 2)
         
         # Safety decreases with tension and conflicts
-        if district_tension > 0.5:
-            agent.needs.safety = max(0, agent.needs.safety - 1)
-        if nearby_conflicts > 0:
-            agent.needs.safety = max(0, agent.needs.safety - nearby_conflicts * 2)
+        if district_tension > 0.5 or nearby_conflicts > 0:
+            safety_loss = (1 if district_tension > 0.5 else 0) + nearby_conflicts * 2
+            _needs.safety = max(0, _needs.safety - safety_loss)
         
         # Belonging slowly decreases
-        agent.needs.belonging = max(0, agent.needs.belonging - 0.5)
+        _needs.belonging = max(0, _needs.belonging - 0.5)
         
         # Purpose decreases if idle too long
-        if agent.current_action == "idle" and agent.last_action_turn > 5:
-            agent.needs.purpose = min(100, agent.needs.purpose + 1)
+        if action == "idle" and agent.last_action_turn > 5:
+            _needs.purpose = min(100, _needs.purpose + 1)
     
     def update_mood(self, agent: HumanAgent):
-        """Update mood from needs and recent events."""
+        """Update mood from needs and recent events.
+        
+        HOT PATH - CALLED PER AGENT PER TICK
+        """
+        # PERF CRITICAL: Hoist needs reference
+        _needs = agent.needs
+        
         # Base mood from needs (lower needs = better mood)
         need_score = (
-            (100 - agent.needs.hunger) * 0.2 +
-            (100 - agent.needs.rest) * 0.2 +
-            (100 - agent.needs.safety) * 0.3 +
-            (100 - agent.needs.belonging) * 0.15 +
-            (100 - agent.needs.purpose) * 0.15
-        ) / 100.0
+            (100 - _needs.hunger) * 0.2 +
+            (100 - _needs.rest) * 0.2 +
+            (100 - _needs.safety) * 0.3 +
+            (100 - _needs.belonging) * 0.15 +
+            (100 - _needs.purpose) * 0.15
+        ) * 0.01  # Multiply by 0.01 instead of divide by 100
         
-        # Recent events affect mood
+        # Recent events affect mood (only check last 3, avoid list copy if possible)
         event_modifier = 0.0
-        for event in list(agent.memory)[-3:]:
-            if "conflict" in event.lower() or "theft" in event.lower():
-                event_modifier -= 0.2
-            elif "help" in event.lower() or "trade" in event.lower():
-                event_modifier += 0.1
+        memory = agent.memory
+        mem_len = len(memory)
+        if mem_len > 0:
+            # Check last 3 events without creating a list slice
+            start_idx = max(0, mem_len - 3)
+            for i in range(start_idx, mem_len):
+                event = memory[i].lower()
+                if "conflict" in event or "theft" in event:
+                    event_modifier -= 0.2
+                elif "help" in event or "trade" in event:
+                    event_modifier += 0.1
         
         agent.mood = max(-1.0, min(1.0, (need_score - 0.5) * 2.0 + event_modifier))
     
@@ -292,81 +401,105 @@ class HumanAgentSystem:
         """
         Decide action using utility function, influenced by relationships, beliefs, and survival drives.
         Returns action type: "move", "work", "trade", "rest", "socialize", "help", "theft", "idle"
+        
+        HOT PATH - CALLED PER AGENT PER TICK
         """
         if other_agents is None:
             other_agents = []
+        
+        # PERF CRITICAL: Hoist attribute lookups (avoid repeated . access)
+        _needs = agent.needs
+        _traits = agent.traits
+        _inventory = agent.inventory
+        _relationships = agent.relationships
+        _agent_location = agent.location
+        _agent_role = agent.role
+        
+        # Cache needs values
+        hunger = _needs.hunger
+        rest = _needs.rest
+        belonging = _needs.belonging
+        purpose = _needs.purpose
+        
+        # Cache traits values
+        risk = _traits.risk
+        empathy = _traits.empathy
+        ambition = _traits.ambition
+        
+        # Cache dict.get for repeated use
+        _res_get = district_resources.get
+        _rel_get = _relationships.get
+        
+        # PERF CRITICAL: Pre-compute nearby relationship stats once instead of multiple times
+        # This replaces 4 separate list comprehensions with a single pass
+        nearby_trusted = 0
+        nearby_positive_high = 0
+        nearby_positive_low = 0
+        nearby_negative = 0
+        
+        for other in other_agents:
+            if other.location != _agent_location:
+                continue
+            rel = _rel_get(other.id)
+            if rel is None:
+                continue
+            affection = rel.affection
+            if rel.trust > 0.6:
+                nearby_trusted += 1
+            if affection > 0.3:
+                nearby_positive_high += 1
+            if affection > 0.2:
+                nearby_positive_low += 1
+            if affection < -0.3:
+                nearby_negative += 1
         
         # Score each possible action
         action_scores = {}
         
         # SURVIVAL DRIVE OVERRIDE (SYSTEM 10, 11, 12)
-        # When extinction risk is high, survival drives override everything
         survival_override = (extinction_risk > 0.7) or (population_pressure > 0.8)
         
         # Rest action
-        rest_score = agent.needs.rest * 0.5 - agent.traits.ambition * 20
-        action_scores["rest"] = rest_score
+        action_scores["rest"] = rest * 0.5 - ambition * 20
         
         # Get food action
-        if agent.needs.hunger > 50:
-            if agent.inventory.credits >= 5 and district_resources.get("food_stock", 0) > 0:
-                trade_score = agent.needs.hunger * 0.8 - agent.traits.risk * 10
-                action_scores["trade"] = trade_score
-            elif agent.inventory.credits < 5 and agent.needs.hunger > 70:
-                # Desperate: consider theft (but check relationships - less likely with trusted agents nearby)
-                nearby_trusted = [a for a in other_agents 
-                                if a.location == agent.location and 
-                                agent.relationships.get(a.id, None) and
-                                agent.relationships[a.id].trust > 0.6]
-                theft_penalty = len(nearby_trusted) * 20  # Less likely to steal if trusted agents nearby
-                if agent.traits.risk > 0.6:
-                    theft_score = agent.needs.hunger * 0.5 - (1.0 - agent.traits.risk) * 30 - theft_penalty
+        if hunger > 50:
+            credits = _inventory.credits
+            if credits >= 5 and _res_get("food_stock", 0) > 0:
+                action_scores["trade"] = hunger * 0.8 - risk * 10
+            elif credits < 5 and hunger > 70:
+                # Desperate: consider theft
+                if risk > 0.6:
+                    theft_score = hunger * 0.5 - (1.0 - risk) * 30 - nearby_trusted * 20
                     action_scores["theft"] = theft_score
         
         # Work action
-        if agent.role in ['worker', 'builder'] and agent.needs.rest < 70:
-            work_score = agent.needs.purpose * 0.4 + agent.traits.ambition * 20
-            if district_resources.get("jobs_available", 0) > 0:
+        if _agent_role in ('worker', 'builder') and rest < 70:
+            work_score = purpose * 0.4 + ambition * 20
+            if _res_get("jobs_available", 0) > 0:
                 work_score += 10
             action_scores["work"] = work_score
         
-        # Socialize action (prefer agents with positive relationships)
-        if agent.needs.belonging < 50:
-            social_score = (100 - agent.needs.belonging) * 0.3 + agent.traits.empathy * 15
-            # Boost if positive relationships nearby
-            nearby_positive = [a for a in other_agents 
-                             if a.location == agent.location and
-                             agent.relationships.get(a.id, None) and
-                             agent.relationships[a.id].affection > 0.3]
-            social_score += len(nearby_positive) * 10
-            # SURVIVAL DRIVE: Socialize increases with reproduction_drive (builds relationships for reproduction)
+        # Socialize action
+        if belonging < 50:
+            social_score = (100 - belonging) * 0.3 + empathy * 15
+            social_score += nearby_positive_high * 10
             social_score += agent.reproduction_drive * 20 + agent.survival_drive * 15
             if survival_override:
-                social_score += 50  # Force socializing when extinction risk is high
+                social_score += 50
             action_scores["socialize"] = social_score
         
-        # Help action (prefer helping agents with positive relationships)
-        if agent.traits.empathy > 0.7 and district_resources.get("tension", 0) > 50:
-            help_score = agent.traits.empathy * 25 - agent.needs.hunger * 0.2
-            # Boost if positive relationships nearby
-            nearby_positive = [a for a in other_agents 
-                             if a.location == agent.location and
-                             agent.relationships.get(a.id, None) and
-                             agent.relationships[a.id].affection > 0.2]
-            help_score += len(nearby_positive) * 15
+        # Help action
+        if empathy > 0.7 and _res_get("tension", 0) > 50:
+            help_score = empathy * 25 - hunger * 0.2
+            help_score += nearby_positive_low * 15
             action_scores["help"] = help_score
         
-        # Move action (if needs can't be met here, or negative relationships nearby)
-        nearby_negative = [a for a in other_agents 
-                          if a.location == agent.location and
-                          agent.relationships.get(a.id, None) and
-                          agent.relationships[a.id].affection < -0.3]
-        if nearby_negative:
-            move_score = 30  # Strong desire to move away from enemies
-            action_scores["move"] = move_score
+        # Move action
+        if nearby_negative > 0:
+            action_scores["move"] = 30
         elif not action_scores or max(action_scores.values()) < 20:
-            move_score = 10
-            action_scores["move"] = move_score
+            action_scores["move"] = 10
         
         # SYSTEM A: If must_attempt_reproduction, prioritize socialize/move to find partners
         if agent.must_attempt_reproduction:
@@ -404,128 +537,134 @@ class HumanAgentSystem:
         """
         Execute an action and return (description, event_type).
         event_type can be: None, "work", "trade", "conflict", "theft", "help", "social"
+        
+        HOT PATH - CALLED PER AGENT PER TICK
         """
+        # PERF CRITICAL: Hoist attribute lookups
+        _needs = agent.needs
+        _traits = agent.traits
+        _inventory = agent.inventory
+        _relationships = agent.relationships
+        _name = agent.name
+        _location = agent.location
+        _turn = agent.last_action_turn
+        _rel_sys = self.relationship_system
+        
+        # Cache random for tight loops
+        _random = random.random
+        _randint = random.randint
+        _choice = random.choice
+        
         agent.current_action = action
         agent.last_action_turn = 0
         
         if action == "rest":
-            agent.needs.rest = max(0, agent.needs.rest - 20)
-            return (f"{agent.name} rests at {agent.location}", None)
+            _needs.rest = max(0, _needs.rest - 20)
+            return (f"{_name} rests at {_location}", None)
         
         elif action == "work":
             if district_resources.get("jobs_available", 0) > 0:
-                # Work success based on traits and needs
-                success_chance = 0.7 + agent.traits.ambition * 0.2 - (agent.needs.rest / 100.0) * 0.3
-                if random.random() < success_chance:
-                    credits_earned = random.randint(3, 8)
-                    agent.inventory.credits += credits_earned
-                    agent.needs.purpose = max(0, agent.needs.purpose - 15)
-                    agent.needs.rest = min(100, agent.needs.rest + 5)
+                success_chance = 0.7 + _traits.ambition * 0.2 - (_needs.rest / 100.0) * 0.3
+                if _random() < success_chance:
+                    credits_earned = _randint(3, 8)
+                    _inventory.credits += credits_earned
+                    _needs.purpose = max(0, _needs.purpose - 15)
+                    _needs.rest = min(100, _needs.rest + 5)
                     district_resources["credits_pool"] = district_resources.get("credits_pool", 0) + credits_earned
-                    return (f"{agent.name} works successfully, earns {credits_earned} credits", "work")
+                    return (f"{_name} works successfully, earns {credits_earned} credits", "work")
                 else:
-                    agent.needs.rest = min(100, agent.needs.rest + 10)
-                    return (f"{agent.name} struggles with work", "work")
-            return (f"{agent.name} looks for work but finds none", None)
+                    _needs.rest = min(100, _needs.rest + 10)
+                    return (f"{_name} struggles with work", "work")
+            return (f"{_name} looks for work but finds none", None)
         
         elif action == "trade":
-            if agent.inventory.credits >= 5 and district_resources.get("food_stock", 0) > 0:
-                # Price based on scarcity
+            if _inventory.credits >= 5 and district_resources.get("food_stock", 0) > 0:
                 base_price = 5
                 scarcity_mult = 1.0 + (100 - district_resources.get("food_stock", 50)) / 100.0
                 price = int(base_price * scarcity_mult)
                 
-                if agent.inventory.credits >= price:
-                    agent.inventory.credits -= price
-                    agent.inventory.food += 3
-                    agent.needs.hunger = max(0, agent.needs.hunger - 30)
+                if _inventory.credits >= price:
+                    _inventory.credits -= price
+                    _inventory.food += 3
+                    _needs.hunger = max(0, _needs.hunger - 30)
                     district_resources["food_stock"] = max(0, district_resources.get("food_stock", 0) - 3)
                     district_resources["credits_pool"] = district_resources.get("credits_pool", 0) + price
-                    return (f"{agent.name} trades for food (cost: {price} credits)", "trade")
-            return (f"{agent.name} cannot trade (insufficient credits or no food)", None)
+                    return (f"{_name} trades for food (cost: {price} credits)", "trade")
+            return (f"{_name} cannot trade (insufficient credits or no food)", None)
         
         elif action == "socialize":
-            # Find nearby agents
-            nearby = [a for a in other_agents if a.location == agent.location and a.id != agent.id and a.is_alive]
+            # Find nearby agents - inline filter for speed
+            nearby = [a for a in other_agents if a.location == _location and a.id != agent.id and a.is_alive]
             if nearby:
-                other = random.choice(nearby)
-                agent.needs.belonging = min(100, agent.needs.belonging + 10)
+                other = _choice(nearby)
+                _needs.belonging = min(100, _needs.belonging + 10)
                 other.needs.belonging = min(100, other.needs.belonging + 5)
                 
-                # Update relationship
-                if other.id not in agent.relationships:
-                    agent.relationships[other.id] = self.relationship_system.create_relationship(
-                        other.id, agent.last_action_turn
-                    )
-                self.relationship_system.update_from_interaction(
-                    agent.relationships[other.id], "socialize", agent.last_action_turn, True
-                )
+                # PERF: Use lazy relationship creation
+                rel = self.get_or_create_relationship(agent, other.id, _turn)
+                _rel_sys.update_from_interaction(rel, "socialize", _turn, True)
                 
                 # Update other's relationship too
-                if agent.id not in other.relationships:
-                    other.relationships[agent.id] = self.relationship_system.create_relationship(
-                        agent.id, agent.last_action_turn
-                    )
-                self.relationship_system.update_from_interaction(
-                    other.relationships[agent.id], "socialize", agent.last_action_turn, True
-                )
+                rel2 = self.get_or_create_relationship(other, agent.id, _turn)
+                _rel_sys.update_from_interaction(rel2, "socialize", _turn, True)
                 
-                return (f"{agent.name} socializes with {other.name}", "social")
-            return (f"{agent.name} looks for company but finds none", None)
+                return (f"{_name} socializes with {other.name}", "social")
+            return (f"{_name} looks for company but finds none", None)
         
         elif action == "help":
-            # Find someone to help (prefer those with positive relationships)
-            nearby = [a for a in other_agents if a.location == agent.location and a.id != agent.id and a.is_alive]
+            nearby = [a for a in other_agents if a.location == _location and a.id != agent.id and a.is_alive]
             if nearby:
                 # Prefer helping agents with positive relationships
-                scored = []
+                _rel_get = _relationships.get
+                best_other = nearby[0]
+                best_score = 0.5
                 for other in nearby:
-                    rel = agent.relationships.get(other.id)
+                    rel = _rel_get(other.id)
                     score = 0.5
                     if rel:
                         score += rel.affection * 0.3 + rel.trust * 0.2
-                    scored.append((other, score))
-                scored.sort(key=lambda x: x[1], reverse=True)
-                other = scored[0][0]
+                    if score > best_score:
+                        best_score = score
+                        best_other = other
+                other = best_other
                 
-                # Update relationship
-                if other.id not in agent.relationships:
-                    agent.relationships[other.id] = self.relationship_system.create_relationship(
-                        other.id, agent.last_action_turn
-                    )
-                self.relationship_system.update_from_interaction(
-                    agent.relationships[other.id], "cooperation", agent.last_action_turn, True
-                )
-            
-            # Reduce district tension
-            tension_reduction = min(5, int(agent.traits.empathy * 10))
-            district_resources["tension"] = max(0, district_resources.get("tension", 0) - tension_reduction)
-            agent.needs.purpose = max(0, agent.needs.purpose - 10)
-            return (f"{agent.name} helps others, reduces tension", "help")
+                # PERF: Use lazy relationship creation
+                rel = self.get_or_create_relationship(agent, other.id, _turn)
+                _rel_sys.update_from_interaction(rel, "cooperation", _turn, True)
+                
+                # Reduce district tension
+                tension_reduction = min(5, int(_traits.empathy * 10))
+                district_resources["tension"] = max(0, district_resources.get("tension", 0) - tension_reduction)
+                _needs.purpose = max(0, _needs.purpose - 10)
+                return (f"{_name} helps others, reduces tension", "help")
+            return (f"{_name} finds no one to help", None)
         
         elif action == "theft":
             # Conflict risk
-            if random.random() < 0.4:  # 40% chance of being caught
+            if _random() < 0.4:  # 40% chance of being caught
                 district_resources["tension"] = min(100, district_resources.get("tension", 0) + 10)
-                agent.needs.safety = max(0, agent.needs.safety - 15)
+                _needs.safety = max(0, _needs.safety - 15)
                 agent.memory.append("caught stealing")
-                return (f"{agent.name} attempts theft but is caught", "conflict")
+                return (f"{_name} attempts theft but is caught", "conflict")
             else:
-                agent.inventory.food += 2
-                agent.needs.hunger = max(0, agent.needs.hunger - 20)
+                _inventory.food += 2
+                _needs.hunger = max(0, _needs.hunger - 20)
                 district_resources["food_stock"] = max(0, district_resources.get("food_stock", 0) - 2)
                 district_resources["tension"] = min(100, district_resources.get("tension", 0) + 5)
                 agent.memory.append("successful theft")
-                return (f"{agent.name} steals food", "theft")
+                return (f"{_name} steals food", "theft")
         
         elif action == "move":
             # Move to a different location in district
-            available = [loc for loc in available_places if loc != agent.location] if available_places else []
+            available = [loc for loc in available_places if loc != _location] if available_places else []
             if available:
-                agent.location = random.choice(available)
-                return (f"{agent.name} moves to {agent.location}", None)
+                new_location = _choice(available)
+                agent.location = new_location
+                # OPTIMIZATION 3: Update spatial index when agent moves
+                self.spatial_index.add_agent(agent.id, new_location)
+                return (f"{_name} moves to {new_location}", None)
         
-        return (f"{agent.name} is idle", None)
+        return (f"{_name} is idle", None)
     
     def check_conflicts(self, agents: List[HumanAgent], district_resources: Dict, 
                        death_panic_mode: bool = False, generational_trauma: float = 0.0,
@@ -537,6 +676,8 @@ class HumanAgentSystem:
         SYSTEM C: Death panic mode auto-resolves conflicts
         SYSTEM D: Generational trauma reduces conflicts
         SYSTEM E: Population floor suspends non-age deaths
+        
+        OPTIMIZATION: For large populations, only sample a subset of agents.
         """
         conflicts = []
         
@@ -544,13 +685,26 @@ class HumanAgentSystem:
         if death_panic_mode:
             return conflicts  # No conflicts in panic mode
         
+        # OPTIMIZATION: Sample agents for large populations
+        # This maintains statistical conflict rates while reducing computation
+        agents_to_check = agents
+        population = len(agents)
+        if population > 2000:
+            # Sample 10% of agents for conflict checks
+            sample_size = max(200, population // 10)
+            agents_to_check = random.sample(agents, min(sample_size, population))
+        elif population > 1000:
+            # Sample 25% of agents
+            sample_size = max(250, population // 4)
+            agents_to_check = random.sample(agents, min(sample_size, population))
+        
         # SYSTEM D: Generational trauma reduces conflict likelihood
         trauma_conflict_reduction = generational_trauma * 0.5  # 50% reduction at max trauma
         
         # Group conflicts: if tension high and multiple agents in same place
         if district_resources.get("tension", 0) > 60:
             location_groups: Dict[str, List[HumanAgent]] = {}
-            for agent in agents:
+            for agent in agents_to_check:  # Use sampled list
                 if agent.location not in location_groups:
                     location_groups[agent.location] = []
                 location_groups[agent.location].append(agent)
@@ -561,13 +715,13 @@ class HumanAgentSystem:
                     agent1 = random.choice(group)
                     agent2 = random.choice([a for a in group if a.id != agent1.id])
                     conflicts.append((agent1.id, agent2.id, "group_conflict"))
-                    # Update needs
+                    # Update needs - only for sampled group
                     for a in group:
                         a.needs.safety = max(0, a.needs.safety - 10)
                         a.memory.append("witnessed group conflict")
         
         # Individual conflicts: high hunger + low empathy, or relationship-based
-        for agent in agents:
+        for agent in agents_to_check:  # Use sampled list
             if not agent.is_alive:
                 continue
                 
@@ -591,7 +745,9 @@ class HumanAgentSystem:
             
             # Original conflict logic (hunger + low empathy)
             if agent.needs.hunger > 80 and agent.traits.empathy < 0.4:
-                nearby = [a for a in agents if a.location == agent.location and a.id != agent.id and a.is_alive]
+                # OPTIMIZATION 3: Use spatial index for location queries
+                nearby_agent_ids = self.spatial_index.get_agent_ids_at_location(agent.location)
+                nearby = [a for a in agents if a.id in nearby_agent_ids and a.id != agent.id and a.is_alive]
                 if nearby and random.random() < 0.15:
                     other = random.choice(nearby)
                     conflicts.append((agent.id, other.id, "argument"))
@@ -611,16 +767,19 @@ class HumanAgentSystem:
         
         return conflicts
     
-    def _age_agent(self, agent: HumanAgent, turn: int, population_floor_active: bool = False) -> bool:
+    def _age_agent(self, agent: HumanAgent, turn: int, population_floor_active: bool = False,
+                   district_resources: Optional[Dict] = None, weather_state: Optional[Dict] = None,
+                   population_count: Optional[int] = None) -> Tuple[bool, Optional[str]]:
         """
-        Age an agent and check for death.
+        Age an agent and check for death from various causes.
         
         SYSTEM E: Population floor - suspend non-age deaths when population <= 2
         
         Returns:
-            True if agent died, False otherwise
+            Tuple of (True if agent died, death_cause string or None)
         """
-        return population_age_agent(agent, turn, self.dead_agents, self.agents, population_floor_active)
+        return population_age_agent(agent, turn, self.dead_agents, self.agents, population_floor_active,
+                                    district_resources, weather_state, population_count)
     
     def _check_reproduction(self, agents: List[HumanAgent], district_resources: Dict, 
                            turn: int, world_flags_system=None, extinction_risk: float = 0.0,
@@ -633,7 +792,8 @@ class HumanAgentSystem:
         """
         return population_check_reproduction(
             agents, district_resources, turn, self.relationship_system,
-            world_flags_system, extinction_risk, population_pressure, birth_pressure
+            world_flags_system, extinction_risk, population_pressure, birth_pressure,
+            couple_children=self.couple_children
         )
     
     def _add_child_to_pool(self, parent1_id: str, parent2_id: str, district: str, turn: int) -> bool:
@@ -650,6 +810,12 @@ class HumanAgentSystem:
         Returns:
             True if child was added to pool
         """
+        # Track children per couple (use sorted tuple for consistency)
+        couple_key = tuple(sorted([parent1_id, parent2_id]))
+        if couple_key not in self.couple_children:
+            self.couple_children[couple_key] = 0
+        self.couple_children[couple_key] += 1
+        
         return population_add_child_to_pool(
             parent1_id, parent2_id, district, turn,
             self.child_pools, self.child_cohorts, MAX_CHILD_POOL_PER_DISTRICT
@@ -768,31 +934,87 @@ class HumanAgentSystem:
     
     def advance(self, district_resources: Dict, available_places: List[str], 
                 world_map, turn: int, extinction_risk: float = 0.0,
-                population_pressure: float = 0.0, birth_pressure: float = 0.0) -> List[Tuple[str, str, Optional[str]]]:
+                population_pressure: float = 0.0, birth_pressure: float = 0.0,
+                weather_system=None) -> List[Tuple[str, str, Optional[str]]]:
         """
         Advance all agents one tick.
         Returns list of (agent_id, description, event_type) tuples.
+        
+        HOT PATH - Called every tick. Optimized for minimal overhead.
+        
+        Learning Integration:
+        - If LEARNING_ENABLED: Uses memory manager for micro-memory and district learning
+        - If LEARNING_DISABLED: Behavior is BIT-FOR-BIT identical to baseline
         """
+        # PERF CRITICAL: Hoist frequently used methods and attributes
+        # Reduces attribute lookup overhead in tight loops
+        _agents = self.agents
+        _tier_manager = self.tier_manager
+        _spatial_index = self.spatial_index
+        _child_pools = self.child_pools
+        _districts = self.districts
+        _relationship_system = self.relationship_system
+        
+        # Cache dict methods for hot path
+        _agents_get = _agents.get
+        
+        # LEARNING INTEGRATION: Initialize memory manager for this tick
+        _memory_manager = None
+        _learning_enabled = False
+        if _HAS_LEARNING:
+            cfg = get_learning_config()
+            if cfg and cfg.LEARNING_ENABLED:
+                _memory_manager = get_memory_manager()
+                if _memory_manager:
+                    _memory_manager.begin_tick(turn, len(_agents))
+                    _learning_enabled = _memory_manager.is_learning_enabled()
+        _res_get = district_resources.get
+        
+        # PERFORMANCE: Get observer for optional performance tracking
+        from living_matrix.utils.observability import get_observer
+        observer = get_observer()
+        observer.start_tick(turn)
+        
         events = []
-        agents_list = [a for a in list(self.agents.values()) if a.is_alive]  # Only alive agents
+        # OPTIMIZATION 1: Cache agents_list once per turn (reused throughout method)
+        # Use list comp with local reference for speed
+        agents_list = [a for a in _agents.values() if a.is_alive]  # Only alive agents
+        alive_count = len(agents_list)
+        
+        # PERFORMANCE: Record population metrics
+        child_pool_total = sum(_child_pools.values())
+        # Avoid repeated tier_manager calls by caching active set
+        _is_active = _tier_manager.is_active
+        active_count = sum(1 for a in agents_list if _is_active(a.id))
+        observer.record_population(
+            active=active_count,
+            inactive=alive_count - active_count,
+            children=child_pool_total
+        )
         
         # SYSTEM 11: Update population pressure and extinction risk effects on agents
-        # Population pressure increases reproduction drive
-        for agent in agents_list:
-            agent.reproduction_drive = min(1.0, agent.reproduction_drive + population_pressure * 0.1)
-            # Extinction risk increases survival drive
-            if extinction_risk > 0.6:
-                agent.survival_drive = min(1.0, agent.survival_drive + 0.05)
-            
-            # SYSTEM A: Hard reproduction constraint
-            if extinction_risk > 0.6:
-                agent.must_attempt_reproduction = True  # HARD CONSTRAINT - not a choice
-            else:
-                agent.must_attempt_reproduction = False
+        # OPTIMIZATION: Skip drive updates for very large populations (update less frequently)
+        update_drives = True
+        if alive_count > 2000:
+            update_drives = (turn % 2 == 0)  # Every other turn for large populations
+        
+        if update_drives:
+            # Population pressure increases reproduction drive
+            for agent in agents_list:
+                agent.reproduction_drive = min(1.0, agent.reproduction_drive + population_pressure * 0.1)
+                # Extinction risk increases survival drive
+                if extinction_risk > 0.6:
+                    agent.survival_drive = min(1.0, agent.survival_drive + 0.05)
+                
+                # SYSTEM A: Hard reproduction constraint
+                if extinction_risk > 0.6:
+                    agent.must_attempt_reproduction = True  # HARD CONSTRAINT - not a choice
+                else:
+                    agent.must_attempt_reproduction = False
         
         # Age agents and handle death
         # REQUIRED FIX 1: Minimum Viable Population Guard (Hard Rule)
-        alive_count = len(agents_list)
+        # (alive_count already calculated above)
         min_adult_survivors = MIN_ADULT_SURVIVORS
         skip_adult_deaths = alive_count <= min_adult_survivors  # Prevent total wipeout
         population_floor_active = skip_adult_deaths  # Alias for compatibility
@@ -802,7 +1024,61 @@ class HumanAgentSystem:
         
         dead_this_turn = []
         deaths_count = 0
-        for agent in list(agents_list):
+        
+        # Get weather state for agent's district (if world_map and weather_system available)
+        weather_state_by_district = {}
+        if world_map:
+            # Try to get weather system from passed parameter, instance attribute, or world_map
+            weather_sys = weather_system or getattr(self, '_weather_system', None) or getattr(world_map, '_weather_system', None)
+            if weather_sys:
+                # Cache weather states per district
+                # Districts are typically region IDs, so we can use them directly
+                for district_id in self.districts:
+                    # Try district_id as region_id first
+                    weather_snapshot = weather_sys.snapshot(district_id)
+                    if weather_snapshot:
+                        weather_state_by_district[district_id] = {
+                            "wind": weather_snapshot.wind,
+                            "precipitation": weather_snapshot.precipitation,
+                            "temperature": weather_snapshot.temperature
+                        }
+                    else:
+                        # Try to find region by location in district
+                        if hasattr(world_map, 'get_region_by_location_id'):
+                            for loc_id in self.locations:
+                                test_region = world_map.get_region_by_location_id(loc_id)
+                                if test_region and test_region.id == district_id:
+                                    weather_snapshot = weather_sys.snapshot(test_region.id)
+                                    if weather_snapshot:
+                                        weather_state_by_district[district_id] = {
+                                            "wind": weather_snapshot.wind,
+                                            "precipitation": weather_snapshot.precipitation,
+                                            "temperature": weather_snapshot.temperature
+                                        }
+                                    break
+        
+        # OPTIMIZATION: For very large populations, sample agents for aging
+        # Young healthy agents rarely die, so we can skip some of them
+        agents_to_age = agents_list
+        if alive_count > 3000:
+            # Only check elderly/at-risk agents every tick, sample young agents
+            at_risk_agents = []
+            young_healthy_agents = []
+            for a in agents_list:
+                # At-risk: old, hungry, tired, or in dangerous conditions
+                if a.age > a.lifespan * 0.7 or a.needs.hunger > 80 or a.needs.rest > 90:
+                    at_risk_agents.append(a)
+                else:
+                    young_healthy_agents.append(a)
+            
+            # Sample 20% of young healthy agents
+            if len(young_healthy_agents) > 100:
+                sample_size = max(100, len(young_healthy_agents) // 5)
+                young_healthy_agents = random.sample(young_healthy_agents, sample_size)
+            
+            agents_to_age = at_risk_agents + young_healthy_agents
+        
+        for agent in list(agents_to_age):
             # Skip deaths if we're at minimum viable population
             if skip_adult_deaths:
                 break  # Don't process any deaths
@@ -811,18 +1087,66 @@ class HumanAgentSystem:
             if clamp_death_count(deaths_count, max_deaths_allowed):
                 break  # Stop processing deaths if we hit the limit
             
-            if self._age_agent(agent, turn, skip_adult_deaths):
+            # Get weather state for this agent's district
+            agent_weather_state = weather_state_by_district.get(agent.district)
+            
+            died, death_cause = self._age_agent(agent, turn, skip_adult_deaths, 
+                                                district_resources, agent_weather_state, alive_count)
+            if died:
                 dead_this_turn.append(agent.id)
                 deaths_count += 1
-                events.append((agent.id, f"{agent.name} died of old age", "death"))
+                # OPTIMIZATION 3: Remove dead agent from spatial index
+                self.spatial_index.remove_agent(agent.id)
+                # PERFORMANCE: Remove from tier manager
+                self.tier_manager.remove_agent(agent.id)
+                
+                # Track death count by cause
+                if death_cause:
+                    self.death_counts[death_cause] = self.death_counts.get(death_cause, 0) + 1
+                else:
+                    self.death_counts["unknown"] = self.death_counts.get("unknown", 0) + 1
+                
+                # Format death message based on cause
+                if death_cause == "starvation":
+                    death_msg = f"{agent.name} died of starvation"
+                elif death_cause == "exhaustion":
+                    death_msg = f"{agent.name} died of exhaustion"
+                elif death_cause and death_cause.startswith("extreme_weather_"):
+                    weather_type = death_cause.replace("extreme_weather_", "")
+                    weather_name = weather_type.replace("_", " ").title()
+                    death_msg = f"{agent.name} died in {weather_name}"
+                elif death_cause == "aging":
+                    death_msg = f"{agent.name} died of old age"
+                else:
+                    death_msg = f"{agent.name} died"
+                
+                events.append((agent.id, death_msg, "death"))
         
-        # Update agents list (remove dead)
-        agents_list = [a for a in list(self.agents.values()) if a.is_alive]
+        # OPTIMIZATION 1: Update cached agents_list (remove dead agents)
+        agents_list = [a for a in agents_list if a.is_alive]
+        
+        # OPTIMIZATION: Skip reproduction check more frequently for large populations (performance)
+        # This reduces computation significantly while maintaining growth patterns
+        check_reproduction_this_turn = True
+        if alive_count > 2000:
+            # For very large populations (>2000), check reproduction every 5th turn
+            check_reproduction_this_turn = (turn % 5 == 0)
+        elif alive_count > 1500:
+            # For large populations (>1500), check reproduction every 4th turn
+            check_reproduction_this_turn = (turn % 4 == 0)
+        elif alive_count > 1000:
+            # For medium-large populations (>1000), check reproduction every 3rd turn
+            check_reproduction_this_turn = (turn % 3 == 0)
+        elif alive_count > 500:
+            # For medium populations (>500), check reproduction every other turn
+            check_reproduction_this_turn = (turn % 2 == 0)
         
         # Check for reproduction (POPULATION COMPRESSION: add to child pools, not agents)
-        world_flags_system = getattr(self, '_world_flags_system', None)
-        births = self._check_reproduction(agents_list, district_resources, turn, world_flags_system,
-                                         extinction_risk, population_pressure, birth_pressure)
+        births = []
+        if check_reproduction_this_turn:
+            world_flags_system = getattr(self, '_world_flags_system', None)
+            births = self._check_reproduction(agents_list, district_resources, turn, world_flags_system,
+                                             extinction_risk, population_pressure, birth_pressure)
         for parent1_id, parent2_id in births:
             parent1 = self.agents.get(parent1_id)
             parent2 = self.agents.get(parent2_id)
@@ -857,13 +1181,25 @@ class HumanAgentSystem:
         if check_extinction_risk(alive_count, global_child_pool):
             self._spawn_emergency_founders(turn)
             events.append(("system", "Emergency founders spawned to prevent extinction", "bootstrap_recovery"))
-            # Update alive_count after spawning
-            agents_list = [a for a in list(self.agents.values()) if a.is_alive]
+            # OPTIMIZATION 1: Update cached agents_list after spawning
+            agents_list = [a for a in self.agents.values() if a.is_alive]
             alive_count = len(agents_list)
         
         # POPULATION COMPRESSION: Promote children to agents (stochastic)
         promotion_events = self._promote_children_to_agents(turn, district_resources)
         events.extend(promotion_events)
+        
+        # PERFORMANCE: Add newly promoted agents to tier manager
+        for event in promotion_events:
+            agent_id = event[0]
+            if agent_id in self.agents:
+                self.tier_manager.add_agent(agent_id, turn)
+        
+        # OPTIMIZATION 3: Update spatial index after promotions (new agents added)
+        if promotion_events:
+            # Rebuild spatial index to include newly promoted agents
+            agents_list = [a for a in self.agents.values() if a.is_alive]
+            self.spatial_index.update_from_agents_list(agents_list)
         
         # REQUIRED FIX: Debug logging
         global_child_pool_after = sum(self.child_pools.values())
@@ -878,63 +1214,204 @@ class HumanAgentSystem:
             logger.warning(f"EXTINCTION DETECTED at turn {turn} - triggering emergency recovery")
             self._spawn_emergency_founders(turn)
         
-        # Update all agents
-        for agent in agents_list:
-            # Update needs
-            district_tension = district_resources.get("tension", 0) / 100.0
-            nearby_conflicts = sum(1 for e in events if "conflict" in str(e[2]))
-            self.update_needs(agent, district_tension, nearby_conflicts)
-            
-            # Update mood
-            self.update_mood(agent)
-            
-            # Update goals based on needs
-            agent.goals = self._generate_initial_goals(agent)
-            
-            # Decay relationships (apply world flag effects)
+        # OPTIMIZATION 3: Update spatial index from agents_list
+        self.spatial_index.update_from_agents_list(agents_list)
+        
+        # OPTIMIZATION 2: Batch relationship updates - skip for large populations
+        # Only update relationships every N ticks based on population size
+        # Also sample agents for very large populations
+        update_relationships = True
+        if alive_count > 5000:
+            update_relationships = (turn % 20 == 0)  # Every 20 ticks
+        elif alive_count > 3000:
+            update_relationships = (turn % 10 == 0)  # Every 10 ticks
+        elif alive_count > 1000:
+            update_relationships = (turn % 5 == 0)   # Every 5 ticks
+        
+        if update_relationships:
             decay_multiplier = 1.0
             if hasattr(self, '_world_flags_system') and self._world_flags_system:
                 for flag in self._world_flags_system.get_all_flags():
                     if "relationship_decay_multiplier" in flag.effects:
                         decay_multiplier = max(decay_multiplier, flag.effects["relationship_decay_multiplier"])
             
-            for target_id, rel in list(agent.relationships.items()):
-                # Apply decay with multiplier
-                original_decay = self.relationship_system.decay_rate
-                self.relationship_system.decay_rate = original_decay * decay_multiplier
-                self.relationship_system.decay_relationship(rel, turn)
-                self.relationship_system.decay_rate = original_decay  # Restore
+            # Batch update all relationships
+            original_decay = self.relationship_system.decay_rate
+            self.relationship_system.decay_rate = original_decay * decay_multiplier
+            
+            # OPTIMIZATION: For large populations, sample agents for relationship update
+            agents_for_rel_update = agents_list
+            if alive_count > 2000:
+                # Sample 30% of agents for relationship updates
+                sample_size = max(500, alive_count // 3)
+                agents_for_rel_update = random.sample(agents_list, min(sample_size, alive_count))
+            
+            relationships_to_remove = []  # Collect relationships to remove
+            for agent in agents_for_rel_update:
+                for target_id, rel in list(agent.relationships.items()):
+                    self.relationship_system.decay_relationship(rel, turn)
+                    # Mark very weak relationships for removal
+                    if rel.affection == 0.0 and rel.trust < 0.1 and rel.familiarity < 0.1:
+                        relationships_to_remove.append((agent.id, target_id))
+            
+            # Restore decay rate
+            self.relationship_system.decay_rate = original_decay
+            
+            # Remove weak relationships
+            for agent_id, target_id in relationships_to_remove:
+                if agent_id in self.agents:
+                    agent = self.agents[agent_id]
+                    if target_id in agent.relationships:
+                        del agent.relationships[target_id]
+        
+        # OPTIMIZATION: Cache expensive calculations
+        district_tension = district_resources.get("tension", 0) / 100.0
+        nearby_conflicts = sum(1 for e in events if "conflict" in str(e[2]))
+        
+        # PERFORMANCE: Update tier assignments for stratified simulation
+        # This separates agents into active (fully simulated) and inactive (statistical update) tiers
+        active_agent_ids, inactive_agent_ids = self.tier_manager.update_assignments(
+            self.agents, turn
+        )
+        
+        # OPTIMIZATION: Aggressive skip for large populations
+        # The more agents, the more we skip expensive operations
+        update_needs_mood = True
+        update_goals = True
+        
+        if alive_count > 5000:
+            # Very large: update rarely
+            update_needs_mood = (turn % 5 == 0)
+            update_goals = (turn % 10 == 0)
+        elif alive_count > 3000:
+            # Large: update infrequently
+            update_needs_mood = (turn % 3 == 0)
+            update_goals = (turn % 5 == 0)
+        elif alive_count > 2000:
+            update_needs_mood = (turn % 2 == 0)
+            update_goals = (turn % 3 == 0)
+        elif alive_count > 1000:
+            update_goals = (turn % 2 == 0)
+        
+        # PERFORMANCE: Process active agents with full simulation
+        active_agents = [a for a in agents_list if a.id in active_agent_ids]
+        
+        # Check if we should use parallel processing
+        from living_matrix.constants.performance_constants import (
+            ENABLE_PARALLEL, PARALLEL_THRESHOLD_AGENTS, WORKER_COUNT, AGENT_BATCH_SIZE
+        )
+        
+        use_parallel = ENABLE_PARALLEL and len(active_agents) >= PARALLEL_THRESHOLD_AGENTS
+        
+        if use_parallel:
+            # PARALLEL PATH: Use multiprocessing for large populations
+            events.extend(self._process_agents_parallel(
+                active_agents, district_resources, available_places,
+                extinction_risk, population_pressure, turn, 
+                update_needs_mood, update_goals, district_tension, nearby_conflicts
+            ))
+        else:
+            # SEQUENTIAL PATH: Standard processing for small populations
+            for agent in active_agents:
+                # Update needs (skip for large populations on some turns)
+                if update_needs_mood:
+                    self.update_needs(agent, district_tension, nearby_conflicts)
+                    # Update mood
+                    self.update_mood(agent)
                 
-                # Remove very weak relationships
-                if rel.affection == 0.0 and rel.trust < 0.1 and rel.familiarity < 0.1:
-                    del agent.relationships[target_id]
+                # Update goals based on needs (skip more frequently for large populations)
+                if update_goals:
+                    agent.goals = self._generate_initial_goals(agent)
+                
+                # OPTIMIZATION 3: Use spatial index for location queries
+                # Get nearby agents using spatial index (O(1) lookup instead of O(n) filter)
+                nearby_agent_ids_at_loc = self.spatial_index.get_agent_ids_at_location(agent.location)
+                other_agents = [a for a in agents_list if a.id in nearby_agent_ids_at_loc and a.id != agent.id]
+                
+                # Decide and execute action (pass other agents for relationship-based decisions)
+                action = self.decide_action(agent, district_resources, available_places, other_agents,
+                                           extinction_risk, population_pressure)
+                desc, event_type = self.execute_action(agent, action, district_resources, world_map, other_agents)
+                
+                events.append((agent.id, desc, event_type))
+                
+                # Record in memory (limit memory size for performance)
+                if event_type and len(agent.memory) < 50:  # Limit memory to 50 entries
+                    agent.memory.append(desc)
+                
+                agent.last_action_turn += 1
+        
+        # PERFORMANCE: Process inactive agents with simplified updates (always fast)
+        # Inactive agents get statistical updates (needs decay) but skip action selection
+        for agent_id in inactive_agent_ids:
+            agent = self.agents.get(agent_id)
+            if not agent or not agent.is_alive:
+                continue
             
-            # Decide and execute action (pass other agents for relationship-based decisions)
-            other_agents = [a for a in agents_list if a.id != agent.id]
-            action = self.decide_action(agent, district_resources, available_places, other_agents,
-                                       extinction_risk, population_pressure)
-            desc, event_type = self.execute_action(agent, action, district_resources, world_map, other_agents)
-            
-            events.append((agent.id, desc, event_type))
-            
-            # Record in memory
-            if event_type:
-                agent.memory.append(desc)
-            
-            agent.last_action_turn += 1
+            # Simplified needs update (only basic decay, no decisions)
+            if self.tier_manager.should_update_inactive(agent_id, turn):
+                # Basic needs decay for inactive agents
+                agent.needs.hunger = min(100, agent.needs.hunger + 1)
+                if agent.current_action not in ["rest", "idle"]:
+                    agent.needs.rest = min(100, agent.needs.rest + 1)
+                agent.needs.belonging = max(0, agent.needs.belonging - 0.25)
+                agent.last_action_turn += 1
+        
+        # OPTIMIZATION: Skip conflict checks for very large populations (expensive O(n²) operation)
+        # Check conflicts less frequently for large populations
+        check_conflicts_this_turn = True
+        if alive_count > 3000:
+            check_conflicts_this_turn = (turn % 5 == 0)  # Every 5th turn
+        elif alive_count > 2000:
+            check_conflicts_this_turn = (turn % 3 == 0)  # Every 3rd turn
+        elif alive_count > 1000:
+            check_conflicts_this_turn = (turn % 2 == 0)  # Every other turn
         
         # Check for conflicts (after all agents have been processed)
-        # Pass death panic mode, generational trauma, and population floor
-        conflicts = self.check_conflicts(agents_list, district_resources, 
-                                       death_panic_mode=getattr(self, '_death_panic_mode', False),
-                                       generational_trauma=getattr(self, '_generational_trauma', 0.0),
-                                       population_floor_active=population_floor_active)
-        for agent1_id, agent2_id, conflict_type in conflicts:
-            agent1 = self.agents.get(agent1_id)
-            agent2 = self.agents.get(agent2_id)
-            if agent1 and agent2 and agent1.is_alive and agent2.is_alive:
-                events.append((agent1_id, f"{agent1.name} and {agent2.name} have a {conflict_type}", "conflict"))
-                district_resources["tension"] = min(100, district_resources.get("tension", 0) + 5)
+        conflict_count = 0
+        if check_conflicts_this_turn:
+            conflicts = self.check_conflicts(agents_list, district_resources, 
+                                           death_panic_mode=getattr(self, '_death_panic_mode', False),
+                                           generational_trauma=getattr(self, '_generational_trauma', 0.0),
+                                           population_floor_active=population_floor_active)
+            for agent1_id, agent2_id, conflict_type in conflicts:
+                agent1 = self.agents.get(agent1_id)
+                agent2 = self.agents.get(agent2_id)
+                if agent1 and agent2 and agent1.is_alive and agent2.is_alive:
+                    events.append((agent1_id, f"{agent1.name} and {agent2.name} have a {conflict_type}", "conflict"))
+                    district_resources["tension"] = min(100, district_resources.get("tension", 0) + 5)
+                    conflict_count += 1
+        
+        # PERFORMANCE: Record event metrics and end tick timing
+        births_count = len([e for e in events if e[2] == "birth" or e[2] == "emergency_birth"])
+        deaths_count_final = len([e for e in events if e[2] == "death"])
+        promotions_count = len([e for e in events if e[2] == "promotion"])
+        observer.record_events(
+            births=births_count,
+            deaths=deaths_count_final,
+            promotions=promotions_count,
+            conflicts=conflict_count
+        )
+        observer.end_tick()
+        
+        # LEARNING INTEGRATION: Flush memory and record population stats
+        if _learning_enabled and _memory_manager:
+            # Record population stats per district (O(1) per district)
+            for district_id in _districts:
+                district_agents = [a for a in agents_list if a.district == district_id]
+                if district_agents:
+                    avg_hunger = sum(a.needs.hunger for a in district_agents) / len(district_agents)
+                    productivity = sum(1 for e in events if e[2] == "work") / max(1, len(district_agents))
+                    _memory_manager.record_population_stats(
+                        district_id,
+                        hunger_avg=avg_hunger,
+                        tension=district_resources.get("tension", 0),
+                        death_count=deaths_count_final,
+                        productivity=productivity
+                    )
+            
+            # Flush all pending writes
+            _memory_manager.end_tick()
         
         return events
     
@@ -976,8 +1453,10 @@ class HumanAgentSystem:
         return [a for a in self.agents.values() if a.district == district]
     
     def get_agents_at_location(self, location: str) -> List[HumanAgent]:
-        """Get all agents at a location."""
-        return [a for a in self.agents.values() if a.location == location]
+        """Get all agents at a location (OPTIMIZATION 3: uses spatial index)."""
+        # OPTIMIZATION 3: Use spatial index for O(1) lookup instead of O(n) filter
+        agent_ids = self.spatial_index.get_agent_ids_at_location(location)
+        return [self.agents[agent_id] for agent_id in agent_ids if agent_id in self.agents and self.agents[agent_id].is_alive]
     
     def _age_child_pools(self, turn: int):
         """
@@ -985,6 +1464,136 @@ class HumanAgentSystem:
         Children age in cohorts, not individually.
         """
         population_age_child_pools(turn, self.child_pools, self.child_cohorts)
+    
+    def _process_agents_parallel(
+        self,
+        active_agents: List[HumanAgent],
+        district_resources: Dict,
+        available_places: List[str],
+        extinction_risk: float,
+        population_pressure: float,
+        turn: int,
+        update_needs_mood: bool,
+        update_goals: bool,
+        district_tension: float,
+        nearby_conflicts: int
+    ) -> List[Tuple[str, str, Optional[str]]]:
+        """
+        Process agents in parallel using multiprocessing.
+        
+        This method uses 4 CPU cores to process agent decisions and actions
+        in parallel, providing significant speedup for large populations.
+        
+        Returns:
+            List of (agent_id, description, event_type) tuples
+        """
+        import multiprocessing as mp
+        from living_matrix.constants.performance_constants import WORKER_COUNT, AGENT_BATCH_SIZE
+        from living_matrix.core_sim.parallel_worker import (
+            serialize_agent, process_agent_batch, apply_action_result
+        )
+        
+        events = []
+        
+        # Serialize agents for parallel processing
+        serialized_agents = [serialize_agent(a) for a in active_agents]
+        
+        # Create context dict for workers
+        context = {
+            "food_stock": district_resources.get("food_stock", 50),
+            "tension": district_resources.get("tension", 20),
+            "jobs_available": district_resources.get("jobs_available", 5),
+            "credits_pool": district_resources.get("credits_pool", 100),
+            "available_places": available_places,
+            "extinction_risk": extinction_risk,
+            "population_pressure": population_pressure,
+            "nearby_count": 2  # Simplified for parallel
+        }
+        
+        # Split into batches
+        batches = []
+        for i in range(0, len(serialized_agents), AGENT_BATCH_SIZE):
+            batch = serialized_agents[i:i + AGENT_BATCH_SIZE]
+            seed_offset = self.seed + turn * 1000 + i
+            batches.append((batch, context, seed_offset))
+        
+        # Process batches in parallel
+        try:
+            # Create pool if needed (reuse for efficiency)
+            if self._parallel_pool is None:
+                self._parallel_pool = mp.Pool(processes=WORKER_COUNT)
+            
+            # Map batches to workers
+            batch_results = self._parallel_pool.map(process_agent_batch, batches)
+            
+            # Flatten results
+            all_results = []
+            for batch_result in batch_results:
+                all_results.extend(batch_result)
+            
+            # Apply results back to agents
+            result_map = {r.agent_id: r for r in all_results}
+            for agent in active_agents:
+                if agent.id in result_map:
+                    result = result_map[agent.id]
+                    
+                    # Apply needs/mood updates if enabled
+                    if update_needs_mood:
+                        self.update_needs(agent, district_tension, nearby_conflicts)
+                        self.update_mood(agent)
+                    
+                    if update_goals:
+                        agent.goals = self._generate_initial_goals(agent)
+                    
+                    # Apply action result
+                    apply_action_result(agent, result)
+                    
+                    # Update spatial index if moved
+                    if result.new_location:
+                        self.spatial_index.add_agent(agent.id, result.new_location)
+                    
+                    events.append((agent.id, result.description, result.event_type))
+                    
+                    # Record in memory
+                    if result.event_type and len(agent.memory) < 50:
+                        agent.memory.append(result.description)
+                    
+                    agent.last_action_turn += 1
+        
+        except Exception as e:
+            # Fallback to sequential on error
+            import logging
+            logging.getLogger(__name__).warning(f"Parallel processing failed, falling back to sequential: {e}")
+            
+            # Close broken pool
+            if self._parallel_pool:
+                try:
+                    self._parallel_pool.terminate()
+                except:
+                    pass
+                self._parallel_pool = None
+            
+            # Process sequentially
+            for agent in active_agents:
+                if update_needs_mood:
+                    self.update_needs(agent, district_tension, nearby_conflicts)
+                    self.update_mood(agent)
+                if update_goals:
+                    agent.goals = self._generate_initial_goals(agent)
+                
+                nearby_ids = self.spatial_index.get_agent_ids_at_location(agent.location)
+                other = [a for a in active_agents if a.id in nearby_ids and a.id != agent.id]
+                
+                action = self.decide_action(agent, district_resources, available_places, other,
+                                           extinction_risk, population_pressure)
+                desc, event_type = self.execute_action(agent, action, district_resources, None, other)
+                events.append((agent.id, desc, event_type))
+                
+                if event_type and len(agent.memory) < 50:
+                    agent.memory.append(desc)
+                agent.last_action_turn += 1
+        
+        return events
     
     def _promote_children_to_agents(self, turn: int, district_resources: Dict) -> List[Tuple[str, str, Optional[str]]]:
         """

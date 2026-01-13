@@ -1,19 +1,23 @@
 """Reproduction functions."""
 
 import random
-from typing import List, Dict, Tuple, TYPE_CHECKING
+from typing import List, Dict, Tuple, TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from living_matrix.human_agent import HumanAgent
 
 # Performance optimization: limit pair checks to prevent O(n²) slowdown
-MAX_REPRODUCTION_PAIRS_TO_CHECK = 2000  # Limit pair checks per turn for performance
+# Reduced further for large populations
+MAX_REPRODUCTION_PAIRS_TO_CHECK = 500  # Limit pair checks per turn for performance (reduced from 1000 for better performance)
+
+# Import constants
+from living_matrix.constants.population_constants import MAX_CHILDREN_PER_COUPLE
 
 
 def check_reproduction(agents: List['HumanAgent'], district_resources: Dict, 
                       turn: int, relationship_system, world_flags_system=None, 
                       extinction_risk: float = 0.0, population_pressure: float = 0.0, 
-                      birth_pressure: float = 0.0) -> List[Tuple[str, str]]:
+                      birth_pressure: float = 0.0, couple_children: Optional[Dict[Tuple[str, str], int]] = None) -> List[Tuple[str, str]]:
     """
     Check for reproduction opportunities (SYSTEM 12 - FORCED REPRODUCTION).
     
@@ -57,7 +61,9 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
     
     # OPTIMIZATION: Calculate population_count once
     population_count = len([a for a in agents if a.is_alive])
-    survival_instinct = population_count < 20
+    # Survival instinct: allow cross-district reproduction when population is struggling
+    # Raised threshold from 20 to 50 to help early populations survive
+    survival_instinct = population_count < 50
     
     if len(reproductive_agents) == 0:
         alive_agents = [a for a in agents if a.is_alive]
@@ -194,11 +200,43 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
                     logger.debug(f"Forcing reproduction for survival: {agent1.id} + {agent2.id}, affection={rel.affection:.2f}")
             
             if should_reproduce:
-                # Base chance per turn, modified by world flags
-                # Significantly increased to ensure reproduction happens
-                base_chance = 0.15 * reproduction_modifier  # 15% per turn (increased from 8%)
+                # Check how many children this couple already has
+                couple_key = tuple(sorted([agent1.id, agent2.id]))
+                existing_children = couple_children.get(couple_key, 0) if couple_children else 0
                 
-                # FORCE reproduction under panic conditions
+                # Block reproduction if couple already has max children
+                if existing_children >= MAX_CHILDREN_PER_COUPLE:
+                    continue
+                
+                # Base chance per turn, modified by world flags
+                # Further reduced from 1% to 0.5% for much more controlled growth
+                base_chance = 0.005 * reproduction_modifier  # 0.5% per turn (very low for controlled growth)
+                
+                # OPTIMIZATION: Apply aggressive population density penalty to prevent explosive growth
+                # As population grows beyond ideal, reproduction becomes exponentially less likely
+                from living_matrix.constants.population_constants import IDEAL_POPULATION, POPULATION_DENSITY_FACTOR
+                if population_count > IDEAL_POPULATION:
+                    # Calculate density penalty: exponential reduction as population exceeds ideal
+                    excess_population = population_count - IDEAL_POPULATION
+                    density_penalty = 1.0 / (1.0 + (excess_population / IDEAL_POPULATION) * POPULATION_DENSITY_FACTOR)
+                    base_chance *= density_penalty
+                    # Example: at 2000 agents (4x ideal), penalty = 1/(1+3*2) = 1/7 = 0.14 (86% reduction)
+                    # Example: at 5000 agents (10x ideal), penalty = 1/(1+9*2) = 1/19 = 0.05 (95% reduction)
+                
+                # Additional hard cap: if population is extremely high, make reproduction nearly impossible
+                if population_count > IDEAL_POPULATION * 5:  # > 2500 agents
+                    base_chance *= 0.1  # Additional 90% reduction on top of density penalty
+                elif population_count > IDEAL_POPULATION * 3:  # > 1500 agents
+                    base_chance *= 0.3  # Additional 70% reduction
+                elif population_count > IDEAL_POPULATION * 2:  # > 1000 agents
+                    base_chance *= 0.5  # Additional 50% reduction
+                
+                # Reduce chance based on number of existing children
+                # 1st child: 100%, 2nd: 80%, 3rd: 60%, 4th: 40%, 5th: 20%
+                child_reduction = 1.0 - (existing_children * 0.2)  # Each child reduces by 20%
+                base_chance *= max(0.2, child_reduction)  # Minimum 20% chance even at max
+                
+                # FORCE reproduction under panic conditions (override child limit)
                 if extinction_panic or must_reproduce:
                     base_chance = min(0.30, base_chance * 10.0)  # 10x chance, max 30% (HARD CONSTRAINT)
                 if legacy_drive_high:

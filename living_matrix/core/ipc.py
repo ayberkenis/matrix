@@ -199,6 +199,16 @@ class MatrixStateStore:
         """Get culture data (thread-safe)."""
         with self._lock:
             return getattr(self, '_culture_data', None)
+    
+    def set_death_counts(self, death_counts: Dict[str, int]):
+        """Set death counts by cause (thread-safe)."""
+        with self._lock:
+            self._death_counts = death_counts
+    
+    def get_death_counts(self) -> Dict[str, int]:
+        """Get death counts by cause (thread-safe)."""
+        with self._lock:
+            return getattr(self, '_death_counts', {})
 
 
 class MatrixCommandQueue:

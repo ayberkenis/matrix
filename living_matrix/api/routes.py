@@ -77,17 +77,69 @@ def setup_routes(debug_mode: bool = False):
         if hasattr(state, 'weather_detail') and state.weather_detail:
             response["weather"] = state.weather_detail
         
+        # Add death counts to economy (world state data)
+        death_counts = _state_store.get_death_counts()
+        if death_counts and isinstance(response.get("economy"), dict):
+            response["economy"]["death_counts"] = death_counts
+        
         return response
     
     @router.get("/agents")
-    async def get_agents():
-        """Get all agents."""
+    async def get_agents(
+        limit: int = 100,
+        offset: int = 0,
+        district: str = None,
+        role: str = None,
+        alive_only: bool = True
+    ):
+        """
+        Get agents with pagination and filtering.
+        
+        Args:
+            limit: Maximum number of agents to return (default 100, max 1000)
+            offset: Number of agents to skip (default 0)
+            district: Filter by district ID (optional)
+            role: Filter by role (optional)
+            alive_only: Only return alive agents (default True)
+        
+        Returns:
+            Paginated list of agents with metadata
+        """
         if _state_store is None:
             raise HTTPException(status_code=503, detail="World not initialized")
-        agents = _state_store.get_agents()
+        
+        # Clamp limit
+        limit = max(1, min(1000, limit))
+        offset = max(0, offset)
+        
+        # Get all agents
+        all_agents = _state_store.get_agents()
+        
+        # Apply filters
+        filtered_agents = all_agents
+        
+        if alive_only:
+            filtered_agents = [a for a in filtered_agents if a.get('is_alive', True)]
+        
+        if district:
+            filtered_agents = [a for a in filtered_agents if a.get('district') == district]
+        
+        if role:
+            filtered_agents = [a for a in filtered_agents if a.get('role') == role]
+        
+        # Get total count before pagination
+        total_count = len(filtered_agents)
+        
+        # Apply pagination
+        paginated_agents = filtered_agents[offset:offset + limit]
+        
         return {
-            "agents": agents,
-            "count": len(agents)
+            "agents": paginated_agents,
+            "count": len(paginated_agents),
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(paginated_agents) < total_count
         }
     
     @router.get("/agents/{agent_id}")
@@ -364,11 +416,141 @@ def setup_routes(debug_mode: bool = False):
             "elderly": sum(1 for a in alive if a.get('age', 0) >= 800)
         }
         
-        return {
+        response = {
             "alive": len(alive),
             "total": len(agents),
             "age_groups": age_groups,
             "average_age": sum(a.get('age', 0) for a in alive) / len(alive) if alive else 0
         }
+        
+        # Add death counts
+        death_counts = _state_store.get_death_counts()
+        if death_counts:
+            response["death_counts"] = death_counts
+        
+        return response
+    
+    # =========================================================================
+    # GEMINI VISUAL INTELLIGENCE ROUTES
+    # =========================================================================
+    
+    @router.get("/state/image")
+    async def get_state_image():
+        """
+        Get the latest Matrix-style visualization of the simulation state.
+        
+        This endpoint returns the most recently generated image from the
+        Gemini Visual Intelligence layer. Images are generated hourly
+        (simulation time) based on aggregated state snapshots.
+        
+        Returns:
+            - 200: Image data (image/png or image/jpeg)
+            - 204: No image generated yet
+            - 503: Gemini worker not available
+        
+        Headers:
+            - X-Simulation-Day: The simulation day when image was generated
+            - X-Simulation-Hour: The simulation hour when image was generated
+            - X-State-Hash: Hash of the state snapshot used
+            - X-Prompt-Hash: Hash of the prompt used for generation
+        
+        Note: This endpoint is READ-ONLY and serves cached images.
+        It NEVER triggers Gemini API calls directly.
+        """
+        from fastapi.responses import Response
+        
+        try:
+            from living_matrix.gemini.worker import get_worker
+            worker = get_worker()
+            
+            if not worker.is_running():
+                # Worker not started - return placeholder response
+                raise HTTPException(
+                    status_code=503,
+                    detail="Gemini image worker not running"
+                )
+            
+            image = worker.get_latest_image()
+            
+            if image is None:
+                # No image generated yet
+                return Response(
+                    status_code=204,
+                    headers={
+                        "X-Message": "No image generated yet. Images are generated hourly."
+                    }
+                )
+            
+            # Return the image with metadata headers
+            return Response(
+                content=image.image_data,
+                media_type=image.mime_type,
+                headers={
+                    "X-Simulation-Day": str(image.generated_at_day),
+                    "X-Simulation-Hour": str(image.generated_at_hour),
+                    "X-Simulation-Turn": str(image.generated_at_turn),
+                    "X-State-Hash": image.state_hash,
+                    "X-Prompt-Hash": image.prompt_hash,
+                    "X-Generated-At": image.generated_at_timestamp,
+                    "X-Generation-Time-Ms": str(image.generation_time_ms),
+                }
+            )
+            
+        except ImportError:
+            raise HTTPException(
+                status_code=503,
+                detail="Gemini module not available"
+            )
+    
+    @router.get("/state/image/info")
+    async def get_state_image_info():
+        """
+        Get metadata about the latest generated image without the image data.
+        
+        Useful for checking if a new image is available without downloading it.
+        Also provides debug information about the worker state.
+        """
+        try:
+            from living_matrix.gemini.worker import get_worker
+            from living_matrix.gemini.client import get_client
+            
+            worker = get_worker()
+            client = get_client()
+            
+            stats = worker.get_stats()
+            image = worker.get_latest_image()
+            
+            response = {
+                "worker_running": stats.get("running", False),
+                "images_generated": stats.get("images_generated", 0),
+                "generation_failures": stats.get("generation_failures", 0),
+                "rate_limit_hits": stats.get("rate_limit_hits", 0),
+                "snapshots_received": stats.get("snapshots_received", 0),
+                "snapshots_skipped": stats.get("snapshots_skipped", 0),
+                "has_image": image is not None,
+                "client_available": client.is_available if client else False,
+                "client_model": client.IMAGE_MODEL if client else None,
+                "current_wall_hour": stats.get("current_wall_hour"),
+                "last_generation_wall_hour": stats.get("last_generation_wall_hour"),
+                "next_generation_in_seconds": stats.get("next_generation_in_seconds", 0),
+                "rate_limited": stats.get("rate_limited", False),
+                "rate_limit_remaining_seconds": stats.get("rate_limit_remaining_seconds", 0),
+            }
+            
+            if image:
+                response["latest_image"] = image.to_dict()
+            
+            return response
+            
+        except ImportError as e:
+            return {
+                "worker_running": False,
+                "error": f"Gemini module not available: {e}"
+            }
+        except Exception as e:
+            return {
+                "worker_running": False,
+                "error": str(e)
+            }
     
     return router

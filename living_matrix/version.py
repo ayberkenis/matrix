@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional
 class VersionManager:
     """Manages version information for the Living Matrix."""
     
-    VERSION = "1.0.0"  # Current matrix version
+    VERSION = "2.0.2"  # Current matrix version
     
     def __init__(self, data_dir: str = "data"):
         """Initialize version manager."""

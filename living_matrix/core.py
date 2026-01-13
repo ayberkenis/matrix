@@ -144,7 +144,8 @@ class Simulation:
             location_ids = list(self.world_map.locations.keys())
             if not self.human_agent_system:
                 # Ensure minimum number of agents
-                num_agents = max(20, random.randint(12, 30))  # At least 20 agents
+                # Minimum 40 agents concentrated in 3 districts for viable reproduction
+                num_agents = max(40, random.randint(40, 60))
                 self.human_agent_system = HumanAgentSystem(
                     districts=district_ids,
                     locations=location_ids,
@@ -178,7 +179,8 @@ class Simulation:
             district_ids = list(self.world_map.regions.keys())
             location_ids = list(self.world_map.locations.keys())
             # Ensure minimum number of agents
-            num_agents = max(20, random.randint(12, 30))  # At least 20 agents
+            # Minimum 40 agents concentrated in 3 districts for viable reproduction
+            num_agents = max(40, random.randint(40, 60))
             self.human_agent_system = HumanAgentSystem(
                 districts=district_ids,
                 locations=location_ids,
@@ -1833,9 +1835,11 @@ class Simulation:
                 # Link world_flags_system to human_agent_system for reproduction effects
                 if hasattr(self, 'world_flags_system'):
                     self.human_agent_system._world_flags_system = self.world_flags_system
+                # Pass weather_system to human_agent_system for death checks
                 human_events = self.human_agent_system.advance(
                     district_resources, location_ids, self.world_map, self.world.state.turn,
-                    extinction_risk, population_pressure, birth_pressure
+                    extinction_risk, population_pressure, birth_pressure,
+                    weather_system=self.weather_system if hasattr(self, 'weather_system') else None
                 )
                 all_human_events.extend(human_events)
                 

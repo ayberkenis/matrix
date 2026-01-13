@@ -71,18 +71,22 @@ async def websocket_endpoint(websocket: WebSocket):
         # Send initial snapshot
         state = _state_store.get_state()
         if state:
+            death_counts = _state_store.get_death_counts()
+            payload = {
+                "turn": state.turn,
+                "day": state.day,
+                "time": state.time,
+                "weather": state.weather,
+                "economy": state.economy,
+                "districts": state.districts,
+                "agents": state.agents,
+                "events": state.events
+            }
+            if death_counts:
+                payload["death_counts"] = death_counts
             await manager.send_personal_message({
                 "type": "state",
-                "payload": {
-                    "turn": state.turn,
-                    "day": state.day,
-                    "time": state.time,
-                    "weather": state.weather,
-                    "economy": state.economy,
-                    "districts": state.districts,
-                    "agents": state.agents,
-                    "events": state.events
-                }
+                "payload": payload
             }, websocket)
         
         # Track last sent turn and events to detect updates
@@ -130,15 +134,19 @@ async def websocket_endpoint(websocket: WebSocket):
                         if current_state:
                             # Send state update
                             last_turn = current_state.turn
+                            death_counts = _state_store.get_death_counts()
+                            payload = {
+                                "turn": current_state.turn,
+                                "day": current_state.day,
+                                "time": current_state.time,
+                                "weather": current_state.weather,
+                                "economy": current_state.economy
+                            }
+                            if death_counts:
+                                payload["death_counts"] = death_counts
                             await manager.send_personal_message({
                                 "type": "state",
-                                "payload": {
-                                    "turn": current_state.turn,
-                                    "day": current_state.day,
-                                    "time": current_state.time,
-                                    "weather": current_state.weather,
-                                    "economy": current_state.economy
-                                }
+                                "payload": payload
                             }, websocket)
                     
                     # Send updates at slower rate (same as events)

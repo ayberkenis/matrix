@@ -38,11 +38,13 @@ def promote_children_to_agents(turn: int, district_resources: Dict,
     """
     events = []
     
-    # Check if we can promote (hard cap on active agents)
+    # Check active count (no hard cap - birth/death rates manage population)
     active_count = len([a for a in agents.values() if a.is_alive])
     
+    # Only check cap if it's very high (safety check to prevent memory issues)
+    # MAX_ACTIVE_AGENTS is now 10000, so this is effectively unlimited
     if active_count >= MAX_ACTIVE_AGENTS:
-        return events  # Cannot promote - at capacity
+        return events  # Safety limit reached
     
     # Try to promote from each district
     for district_id in list(child_pools.keys()):
@@ -77,9 +79,10 @@ def promote_children_to_agents(turn: int, district_resources: Dict,
             continue
         
         # Stochastic promotion: try to promote up to eligible_count children
-        # But respect MAX_ACTIVE_AGENTS limit
+        # No hard cap - birth/death rates manage population naturally
         promotions_this_turn = 0
-        max_promotions = min(eligible_count, MAX_ACTIVE_AGENTS - active_count)
+        # Only limit if we're very close to safety limit (MAX_ACTIVE_AGENTS is 10000)
+        max_promotions = min(eligible_count, max(0, MAX_ACTIVE_AGENTS - active_count)) if active_count >= MAX_ACTIVE_AGENTS - 100 else eligible_count
         
         for _ in range(max_promotions):
             if random.random() < promotion_chance:
@@ -93,7 +96,7 @@ def promote_children_to_agents(turn: int, district_resources: Dict,
                     promotions_this_turn += 1
                     active_count += 1
                     
-                    # Stop if we hit the cap
+                    # Only stop if we hit the safety limit (very high)
                     if active_count >= MAX_ACTIVE_AGENTS:
                         break
     

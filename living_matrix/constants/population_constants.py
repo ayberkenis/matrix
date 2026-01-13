@@ -1,9 +1,18 @@
 """Population system constants."""
 
 # Population compression constants
-MAX_ACTIVE_AGENTS = 500  # Hard cap on active agents
+MAX_ACTIVE_AGENTS = 10000  # Very high cap (effectively unlimited) - birth/death rates manage population
 ADULTHOOD_AGE = 3  # Age when children become adults (turns) - very low for fast promotion (6 simulation turns)
 MAX_CHILD_POOL_PER_DISTRICT = 1000  # Soft cap on child pool per district
+MAX_CHILDREN_PER_COUPLE = 5  # Maximum children a couple can have
+
+# Population density controls (to prevent explosive growth)
+IDEAL_POPULATION = 500  # Target population for balanced growth
+POPULATION_DENSITY_FACTOR = 4.0  # How much population density affects reproduction (increased from 2.0 for much stronger control)
+# When population > IDEAL_POPULATION, reproduction is reduced exponentially
+# Formula: reproduction_multiplier = 1.0 / (1.0 + (population - IDEAL_POPULATION) / IDEAL_POPULATION * POPULATION_DENSITY_FACTOR)
+# At 2000 agents (4x ideal): penalty = 1/(1+3*2) = 1/7 = 0.14 (86% reduction)
+# At 5000 agents (10x ideal): penalty = 1/(1+9*2) = 1/19 = 0.05 (95% reduction)
 
 # Population continuity guards
 MIN_ADULT_SURVIVORS = 2  # Minimum viable population guard (hard rule)
@@ -17,15 +26,15 @@ NAME_PARTS = ['Eli', 'Noa', 'Leo', 'Sam', 'Theo', 'Max', 'Alex', 'Luca', 'Ezra',
               'Ryan', 'Owen', 'Finn', 'Cole', 'Nate', 'Jude']
 
 # Age distribution for initial population
-# Ages adjusted for slower aging - start much younger to ensure reproduction time
-INITIAL_AGE_YOUNG_PROBABILITY = 0.8  # 80% young (increased from 60%)
+# Ages adjusted so agents START in reproductive window (20+)
+INITIAL_AGE_YOUNG_PROBABILITY = 0.8  # 80% young
 INITIAL_AGE_MIDDLE_PROBABILITY = 0.95  # 15% middle-aged (cumulative)
-INITIAL_AGE_YOUNG_MIN = 0
-INITIAL_AGE_YOUNG_MAX = 50  # Much younger - start in reproductive prime
-INITIAL_AGE_MIDDLE_MIN = 50
-INITIAL_AGE_MIDDLE_MAX = 150
-INITIAL_AGE_ELDERLY_MIN = 150
-INITIAL_AGE_ELDERLY_MAX = 200
+INITIAL_AGE_YOUNG_MIN = 25  # Start at 25 - already in reproductive window
+INITIAL_AGE_YOUNG_MAX = 150  # Young adults in reproductive prime
+INITIAL_AGE_MIDDLE_MIN = 150
+INITIAL_AGE_MIDDLE_MAX = 400  # Still well within reproductive window
+INITIAL_AGE_ELDERLY_MIN = 400
+INITIAL_AGE_ELDERLY_MAX = 600  # Still below typical lifespan - 20
 
 # Lifespan constants
 # Increased for slower aging - agents now effectively live twice as long
@@ -55,10 +64,11 @@ INITIAL_PATIENCE_MIN = 0.3
 INITIAL_PATIENCE_MAX = 0.9
 
 # Initial inventory ranges
-INITIAL_FOOD_MIN = 2
-INITIAL_FOOD_MAX = 8
+# Increased food to prevent early starvation before reproduction kicks in
+INITIAL_FOOD_MIN = 10
+INITIAL_FOOD_MAX = 100
 INITIAL_CREDITS_MIN = 10
-INITIAL_CREDITS_MAX = 30
+INITIAL_CREDITS_MAX = 50
 INITIAL_TOOLS_MAX = 2
 
 # Survival drive constants
@@ -98,7 +108,7 @@ CHILD_MORTALITY_RATE_OVER_50 = 0.00001   # 0.001% per aging event
 EMERGENCY_BIRTH_MULTIPLIER = 0.5  # 50% of alive_count per district
 
 # Promotion constants
-# High promotion chance to ensure population growth over time
-BASE_PROMOTION_CHANCE = 0.80  # 80% base chance per eligible child per turn (very high for steady growth)
+# Reduced promotion chance to slow down population growth
+BASE_PROMOTION_CHANCE = 0.30  # 30% base chance per eligible child per turn (reduced from 80% for controlled growth)
 PROMOTION_FOOD_FACTOR_DIVISOR = 50.0
 PROMOTION_JOB_FACTOR_DIVISOR = 8.0

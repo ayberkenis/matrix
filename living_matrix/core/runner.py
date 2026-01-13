@@ -3,9 +3,13 @@
 import asyncio
 import threading
 import time
+import logging
+import os
 from typing import Optional
 from datetime import datetime
 from living_matrix.core.ipc import MatrixStateStore, MatrixCommandQueue, MatrixState, MatrixCommand
+
+logger = logging.getLogger(__name__)
 
 
 class WorldRunner:
@@ -32,8 +36,49 @@ class WorldRunner:
         self._runner_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         
+        # Periodic logging (every 10 seconds)
+        self._last_log_time = time.time()
+        self._log_interval_seconds = 10.0
+        
+        # Gemini Visual Intelligence (observational only)
+        self._gemini_worker = None
+        self._gemini_enabled = os.getenv("GEMINI_ENABLED", "true").lower() not in ("false", "0", "no", "off")
+        self._last_gemini_submit_time = 0.0  # Wall-clock time of last snapshot submission
+        self._gemini_submit_interval = 60  # Submit snapshot every 60 seconds (worker decides when to generate)
+        
         # Initialize simulation
         self.simulation.initialize()
+        
+        # Initialize Gemini worker if enabled and API key present
+        self._init_gemini_worker()
+    
+    def _init_gemini_worker(self):
+        """
+        Initialize Gemini Visual Intelligence worker.
+        
+        The worker is OBSERVATIONAL ONLY - it reads state snapshots
+        and generates Matrix-style images but never modifies simulation.
+        
+        Fails gracefully if Gemini is unavailable.
+        """
+        if not self._gemini_enabled:
+            logger.info("Gemini Visual Intelligence disabled (GEMINI_ENABLED=false)")
+            return
+        
+        if not os.getenv("GEMINI_API_KEY"):
+            logger.info("Gemini Visual Intelligence disabled (no GEMINI_API_KEY)")
+            return
+        
+        try:
+            from living_matrix.gemini.worker import get_worker
+            self._gemini_worker = get_worker()
+            logger.info("Gemini Visual Intelligence initialized")
+        except ImportError as e:
+            logger.warning(f"Gemini module not available: {e}")
+            self._gemini_worker = None
+        except Exception as e:
+            logger.warning(f"Failed to initialize Gemini worker: {e}")
+            self._gemini_worker = None
     
     def start(self):
         """Start the background runner."""
@@ -44,6 +89,14 @@ class WorldRunner:
         self.paused = False
         self._stop_event.clear()
         
+        # Start Gemini worker if available
+        if self._gemini_worker:
+            try:
+                self._gemini_worker.start()
+                logger.info("Gemini image worker started")
+            except Exception as e:
+                logger.warning(f"Failed to start Gemini worker: {e}")
+        
         # Start runner thread
         self._runner_thread = threading.Thread(target=self._run_loop, daemon=True)
         self._runner_thread.start()
@@ -52,6 +105,14 @@ class WorldRunner:
         """Stop the background runner gracefully."""
         self.running = False
         self._stop_event.set()
+        
+        # Stop Gemini worker if running
+        if self._gemini_worker:
+            try:
+                self._gemini_worker.stop()
+                logger.info("Gemini image worker stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping Gemini worker: {e}")
         
         if self._runner_thread:
             self._runner_thread.join(timeout=5.0)
@@ -86,6 +147,12 @@ class WorldRunner:
                         self._tick()
                     except Exception as e:
                         print(f"Error in simulation tick: {e}")
+                
+                # Periodic logging every 10 seconds
+                current_time = time.time()
+                if current_time - self._last_log_time >= self._log_interval_seconds:
+                    self._log_statistics()
+                    self._last_log_time = current_time
                 
                 # Sleep for tick rate
                 time.sleep(self.tick_rate_ms / 1000.0)
@@ -135,6 +202,9 @@ class WorldRunner:
         
         # Update advanced AI systems data (every tick, but lightweight)
         self._update_ai_systems_data()
+        
+        # Submit snapshot to Gemini worker (hourly, observational only)
+        self._submit_gemini_snapshot()
     
     def _create_state_snapshot(self) -> MatrixState:
         """Create a read-only state snapshot."""
@@ -251,17 +321,28 @@ class WorldRunner:
                         districts.append(district_dict)
             elif sim.economy_system:
                 # Fallback to old economy system
+                # Try to get culture from culture system if available
+                culture_system = None
+                if hasattr(sim, 'world_dynamics_system') and hasattr(sim.world_dynamics_system, 'culture_system'):
+                    culture_system = sim.world_dynamics_system.culture_system
+                
                 for district_id, region in sim.world_map.regions.items():
                     economy = sim.economy_system.get_district(district_id)
                     if economy:
-                        districts.append({
+                        district_dict = {
                             "id": district_id,
                             "name": economy.district_name,
                             "food_stock": economy.food_stock,
                             "tension": economy.tension,
                             "jobs_available": economy.jobs_available,
                             "scarcity": economy.scarcity
-                        })
+                        }
+                        # Add culture if available
+                        if culture_system:
+                            culture = culture_system.get_culture(district_id)
+                            if culture:
+                                district_dict["culture"] = culture.to_dict()
+                        districts.append(district_dict)
         
         # Get agents (alive agents only for main state)
         agents = []
@@ -465,6 +546,42 @@ class WorldRunner:
             weather_detail=state_data.get("weather_detail")
         )
     
+    def _log_statistics(self):
+        """Log simulation statistics to console every 10 seconds."""
+        sim = self.simulation
+        try:
+            # Get turn
+            turn = sim.world.state.turn if sim.world.state else 0
+            
+            # Get day
+            day = 0
+            if sim.time_system:
+                day = sim.time_system.day_index
+            
+            # Get agent count
+            agent_count = 0
+            child_pool = 0
+            if sim.human_agent_system:
+                agent_count = len([a for a in sim.human_agent_system.agents.values() if a.is_alive])
+                child_pool = sum(sim.human_agent_system.child_pools.values())
+            
+            # Get district count
+            district_count = 0
+            if sim.world_map:
+                district_count = len(sim.world_map.regions)
+            
+            # Get total population
+            total_population = agent_count + child_pool
+            
+            # Get current timestamp
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            
+            # Format and print
+            print(f"[STATS] Turn: {turn} | Day: {day} | Agents: {agent_count} | Children: {child_pool} | Total Pop: {total_population} | Districts: {district_count} | {timestamp}")
+        except Exception as e:
+            # Don't crash on logging errors
+            print(f"[STATS] Error logging statistics: {e}")
+    
     def _update_ai_systems_data(self):
         """Update AI systems data in state store (causality, emotions, rules)."""
         sim = self.simulation
@@ -526,3 +643,47 @@ class WorldRunner:
                 'cultures': cultures
             }
             self.state_store.set_culture_data(culture_data)
+        
+        # Update death counts
+        if hasattr(sim, 'human_agent_system') and sim.human_agent_system:
+            death_counts = sim.human_agent_system.death_counts.copy() if hasattr(sim.human_agent_system, 'death_counts') else {}
+            self.state_store.set_death_counts(death_counts)
+    
+    def _submit_gemini_snapshot(self):
+        """
+        Submit state snapshot to Gemini worker for image generation.
+        
+        Submits snapshots periodically (every 60 seconds wall-clock time).
+        The worker decides when to actually generate images based on
+        REAL-WORLD hours, not simulation time.
+        
+        IMPORTANT: This is OBSERVATIONAL ONLY - it reads simulation state
+        but never modifies it. Image generation happens in background.
+        """
+        if self._gemini_worker is None:
+            return
+        
+        # Only submit every N seconds (wall-clock time)
+        current_time = time.time()
+        if current_time - self._last_gemini_submit_time < self._gemini_submit_interval:
+            return
+        
+        sim = self.simulation
+        
+        try:
+            # Create lightweight snapshot for Gemini (different from full state)
+            from living_matrix.gemini.snapshot import create_state_snapshot
+            snapshot = create_state_snapshot(sim, self.state_store)
+            
+            if snapshot:
+                # Submit to worker (non-blocking) - worker decides when to generate
+                submitted = self._gemini_worker.submit_snapshot(snapshot)
+                if submitted:
+                    self._last_gemini_submit_time = current_time
+                    # Log at info level to confirm snapshots are being sent
+                    print(f"[GEMINI] Snapshot submitted (Turn {snapshot.simulation_turn}, Day {snapshot.simulation_day}, Pop {snapshot.global_population})")
+            else:
+                print("[GEMINI] Failed to create snapshot")
+        except Exception as e:
+            # Gemini is optional - don't crash simulation
+            print(f"[GEMINI] Error submitting snapshot: {e}")

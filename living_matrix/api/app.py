@@ -96,6 +96,16 @@ def create_app(fresh: bool = False) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[
+            "X-Simulation-Day",
+            "X-Simulation-Hour",
+            "X-Simulation-Turn",
+            "X-State-Hash",
+            "X-Prompt-Hash",
+            "X-Generated-At",
+            "X-Generation-Time-Ms",
+            "X-Message",
+        ],
     )
     
     # Setup routes (will use globals set in lifespan)
