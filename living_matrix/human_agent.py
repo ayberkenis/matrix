@@ -818,18 +818,33 @@ class HumanAgentSystem:
                         a.memory.append("witnessed group conflict")
         
         # Individual conflicts: high hunger + low empathy, or relationship-based
+        # OPTIMIZATION: Cap total relationship conflicts per turn
+        MAX_RELATIONSHIP_CONFLICTS_PER_TURN = 5
+        MAX_RELATIONSHIPS_TO_CHECK_PER_AGENT = 3  # Only check worst 3 relationships
+        relationship_conflicts_count = 0
+        
         for agent in agents_to_check:  # Use sampled list
             if not agent.is_alive:
                 continue
+            
+            # Cap total conflicts per turn
+            if relationship_conflicts_count >= MAX_RELATIONSHIP_CONFLICTS_PER_TURN:
+                break
                 
-            # Check relationship-based conflict
-            for target_id, rel in agent.relationships.items():
+            # Check relationship-based conflict (only sample worst relationships)
+            # Sort by conflict likelihood and only check a few
+            rels_to_check = list(agent.relationships.items())[:MAX_RELATIONSHIPS_TO_CHECK_PER_AGENT]
+            
+            for target_id, rel in rels_to_check:
                 conflict_likelihood = self.relationship_system.get_conflict_likelihood(rel)
+                # Apply trauma reduction here
+                conflict_likelihood *= (1.0 - trauma_conflict_reduction)
                 # conflict_likelihood already includes multiplier, so use directly
                 if random.random() < conflict_likelihood:
                     target = next((a for a in agents if a.id == target_id and a.is_alive), None)
                     if target and target.location == agent.location:
                         conflicts.append((agent.id, target.id, "relationship_conflict"))
+                        relationship_conflicts_count += 1
                         # Update relationship
                         self.relationship_system.update_from_interaction(
                             rel, "conflict", agent.last_action_turn, False

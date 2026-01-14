@@ -56,7 +56,7 @@ async def lifespan(app: FastAPI, fresh: bool = False):
     world_runner.start()
     
     # Set dependencies for routes and WebSocket
-    set_dependencies(state_store, command_queue, version_manager)
+    set_dependencies(state_store, command_queue, version_manager, simulation)
     from living_matrix.api.ws import set_state_store as set_ws_state_store
     set_ws_state_store(state_store)
     

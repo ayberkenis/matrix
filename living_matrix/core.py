@@ -1925,6 +1925,27 @@ class Simulation:
                 population_pressure, extinction_risk, avg_district_pressure
             )
             
+            # =========================================================================
+            # DISTRICT DYNAMICS: Wars, Mergers, Collapses
+            # Run ONCE after all individual district advances
+            # =========================================================================
+            if use_advanced and self.world_dynamics_system:
+                # Build agent count dict from cached agents_by_district
+                agents_count_by_district = {
+                    d_id: len(agents_by_district.get(d_id, []))
+                    for d_id in all_district_ids
+                }
+                
+                # Advance district dynamics
+                district_dynamics_events = self.world_dynamics_system.advance_district_dynamics(
+                    agents_count_by_district, current_turn
+                )
+                
+                # Add district dynamics events to human events
+                for event_type, description, d_id in district_dynamics_events:
+                    all_human_events.append((event_type, description, d_id))
+                    logger.info(f"[DISTRICT DYNAMICS] {event_type}: {description}")
+            
             # SYSTEM 15: Check for extinction (use cached alive_count)
             if alive_count == 0 and self.world.state.world_state == "alive":
                 # Extinction occurred

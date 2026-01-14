@@ -22,4 +22,5 @@ WORK_AFFECTION_INCREASE = 0.02
 WORK_TRUST_INCREASE = 0.03
 
 # Conflict likelihood thresholds
-CONFLICT_LIKELIHOOD_MULTIPLIER = 0.1
+# Reduced from 0.1 to 0.02 to significantly reduce relationship conflict spam
+CONFLICT_LIKELIHOOD_MULTIPLIER = 0.02

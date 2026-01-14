@@ -11,14 +11,21 @@ router = APIRouter()
 _state_store: MatrixStateStore = None
 _command_queue: MatrixCommandQueue = None
 _version_manager = None
+_simulation = None  # Reference to the simulation for advanced queries
 
 
-def set_dependencies(state_store: MatrixStateStore, command_queue: MatrixCommandQueue, version_manager=None):
+def set_dependencies(state_store: MatrixStateStore, command_queue: MatrixCommandQueue, version_manager=None, simulation=None):
     """Set the state store and command queue (called from app.py after initialization)."""
-    global _state_store, _command_queue, _version_manager
+    global _state_store, _command_queue, _version_manager, _simulation
     _state_store = state_store
     _command_queue = command_queue
     _version_manager = version_manager
+    _simulation = simulation
+
+
+def get_simulation():
+    """Get the simulation reference."""
+    return _simulation
 
 
 def setup_routes(debug_mode: bool = False):
@@ -552,5 +559,105 @@ def setup_routes(debug_mode: bool = False):
                 "worker_running": False,
                 "error": str(e)
             }
+    
+    # =========================================================================
+    # DISTRICT DYNAMICS ENDPOINTS
+    # =========================================================================
+    
+    @router.get("/districts/dynamics")
+    async def get_district_dynamics():
+        """
+        Get global district dynamics status including wars, merges, and collapses.
+        
+        Returns:
+            - active_districts: Number of active districts
+            - struggling_districts: Number of struggling districts
+            - districts_at_war: Number of districts at war
+            - collapsed_districts: Number of collapsed districts
+            - active_wars: Number of active wars
+            - total_wars: Total wars in history
+            - total_merges: Total merges in history
+            - total_collapses: Total collapses in history
+            - recent_events: Last 10 district dynamics events
+        """
+        sim = get_simulation()
+        if not sim or not hasattr(sim, 'world_dynamics_system'):
+            raise HTTPException(status_code=503, detail="Simulation not running")
+        
+        if not sim.world_dynamics_system:
+            return {"error": "World dynamics system not initialized"}
+        
+        return sim.world_dynamics_system.get_global_dynamics_status()
+    
+    @router.get("/districts/wars")
+    async def get_active_wars():
+        """
+        Get list of all active wars between districts.
+        
+        Returns list of wars with:
+            - war_id: Unique war identifier
+            - attacker: Attacking district ID
+            - attacker_name: Attacking district name
+            - defender: Defending district ID
+            - defender_name: Defending district name
+            - war_type: Type of war (food_raid, territory, resource_war, ideological, retaliation)
+            - duration: How many turns the war has lasted
+            - intensity: How intense the fighting is (0-1)
+            - casualties_attacker: Attacker casualties
+            - casualties_defender: Defender casualties
+            - status: Current war status description
+        """
+        sim = get_simulation()
+        if not sim or not hasattr(sim, 'world_dynamics_system'):
+            raise HTTPException(status_code=503, detail="Simulation not running")
+        
+        if not sim.world_dynamics_system:
+            return {"wars": []}
+        
+        return {"wars": sim.world_dynamics_system.get_active_wars()}
+    
+    @router.get("/districts/{district_id}/dynamics")
+    async def get_district_dynamics_detail(district_id: str):
+        """
+        Get dynamics detail for a specific district.
+        
+        Returns:
+            - state: Current district state (active, struggling, collapsing, collapsed, at_war, merging)
+            - struggling_turns: Number of consecutive turns in struggling state
+            - war_weariness: Current war weariness (0-1)
+            - defensive_strength: Defensive military strength (0-1)
+            - offensive_strength: Offensive military strength (0-1)
+            - allies: List of allied district IDs
+            - enemies: List of enemy district IDs
+            - current_war: Current war details if in war
+        """
+        sim = get_simulation()
+        if not sim or not hasattr(sim, 'world_dynamics_system'):
+            raise HTTPException(status_code=503, detail="Simulation not running")
+        
+        if not sim.world_dynamics_system:
+            raise HTTPException(status_code=404, detail="World dynamics system not initialized")
+        
+        summary = sim.world_dynamics_system.get_district_dynamics_summary(district_id)
+        if not summary:
+            raise HTTPException(status_code=404, detail=f"District {district_id} not found")
+        
+        return summary
+    
+    @router.get("/districts/collapsed")
+    async def get_collapsed_districts():
+        """
+        Get list of collapsed district IDs.
+        
+        Collapsed districts are no longer active in the simulation.
+        """
+        sim = get_simulation()
+        if not sim or not hasattr(sim, 'world_dynamics_system'):
+            raise HTTPException(status_code=503, detail="Simulation not running")
+        
+        if not sim.world_dynamics_system:
+            return {"collapsed": []}
+        
+        return {"collapsed": sim.world_dynamics_system.get_collapsed_districts()}
     
     return router
