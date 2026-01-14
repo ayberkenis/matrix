@@ -46,3 +46,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 .env
+
+# Gemini generated images (keep .gitkeep only)
+living_matrix/gemini/generations/last.jpg
+living_matrix/gemini/generations/last.json

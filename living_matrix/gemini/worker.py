@@ -20,12 +20,20 @@ import threading
 import time
 import logging
 import hashlib
+import os
+import json
+from pathlib import Path
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import queue
 
 logger = logging.getLogger(__name__)
+
+# Directory for saving generated images
+GENERATIONS_DIR = Path(__file__).parent / "generations"
+LATEST_IMAGE_PATH = GENERATIONS_DIR / "last.jpg"
+LATEST_METADATA_PATH = GENERATIONS_DIR / "last.json"
 
 
 @dataclass
@@ -182,10 +190,21 @@ class GeminiImageWorker:
         """
         Get the latest generated image.
         
-        Thread-safe. Returns None if no image generated yet.
+        Thread-safe. Returns image from memory if available,
+        otherwise tries to load from disk.
         """
         with self._lock:
-            return self._latest_image
+            if self._latest_image is not None:
+                return self._latest_image
+        
+        # Try to load from disk if not in memory
+        disk_image = self.load_image_from_disk()
+        if disk_image:
+            with self._lock:
+                self._latest_image = disk_image
+            return disk_image
+        
+        return None
     
     def get_stats(self) -> Dict[str, Any]:
         """Get worker statistics."""
@@ -399,6 +418,9 @@ class GeminiImageWorker:
             self._last_generation_wall_hour = datetime.now().hour
             self._stats["images_generated"] += 1
         
+        # Save to disk
+        self._save_image_to_disk(image)
+        
         print(
             f"[GEMINI WORKER] ✓ Image generated successfully: {len(result.image_data)} bytes, "
             f"{result.generation_time_ms}ms, saved for Day {snapshot.simulation_day}"
@@ -424,6 +446,84 @@ class GeminiImageWorker:
                 f"Rate limited by Gemini API. Backing off for {self._current_backoff}s "
                 f"(rate_limit_hits: {self._stats['rate_limit_hits']})"
             )
+    
+    def _save_image_to_disk(self, image: GeneratedImage) -> bool:
+        """
+        Save generated image to disk for API serving.
+        
+        Saves to gemini/generations/last.jpg and last.json
+        
+        Args:
+            image: GeneratedImage to save
+            
+        Returns:
+            True if saved successfully
+        """
+        try:
+            # Ensure directory exists
+            GENERATIONS_DIR.mkdir(parents=True, exist_ok=True)
+            
+            # Save image file
+            with open(LATEST_IMAGE_PATH, 'wb') as f:
+                f.write(image.image_data)
+            
+            # Save metadata
+            metadata = image.to_dict()
+            with open(LATEST_METADATA_PATH, 'w') as f:
+                json.dump(metadata, f, indent=2)
+            
+            logger.info(f"Saved image to {LATEST_IMAGE_PATH} ({len(image.image_data)} bytes)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to save image to disk: {e}")
+            return False
+    
+    @staticmethod
+    def load_image_from_disk() -> Optional['GeneratedImage']:
+        """
+        Load the latest image from disk.
+        
+        Returns:
+            GeneratedImage or None if not found
+        """
+        try:
+            if not LATEST_IMAGE_PATH.exists() or not LATEST_METADATA_PATH.exists():
+                return None
+            
+            # Load image data
+            with open(LATEST_IMAGE_PATH, 'rb') as f:
+                image_data = f.read()
+            
+            # Load metadata
+            with open(LATEST_METADATA_PATH, 'r') as f:
+                metadata = json.load(f)
+            
+            return GeneratedImage(
+                image_data=image_data,
+                mime_type=metadata.get('mime_type', 'image/jpeg'),
+                generated_at_day=metadata.get('generated_at_day', 0),
+                generated_at_hour=metadata.get('generated_at_hour', 0),
+                generated_at_turn=metadata.get('generated_at_turn', 0),
+                generated_at_timestamp=metadata.get('generated_at_timestamp', ''),
+                prompt_hash=metadata.get('prompt_hash', ''),
+                state_hash=metadata.get('state_hash', ''),
+                generation_time_ms=metadata.get('generation_time_ms', 0)
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to load image from disk: {e}")
+            return None
+    
+    @staticmethod
+    def get_image_path() -> Path:
+        """Get the path to the latest image file."""
+        return LATEST_IMAGE_PATH
+    
+    @staticmethod
+    def get_metadata_path() -> Path:
+        """Get the path to the latest metadata file."""
+        return LATEST_METADATA_PATH
 
 
 # Singleton worker instance

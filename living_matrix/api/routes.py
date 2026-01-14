@@ -450,8 +450,10 @@ def setup_routes(debug_mode: bool = False):
         Gemini Visual Intelligence layer. Images are generated hourly
         (simulation time) based on aggregated state snapshots.
         
+        The image is served from disk: gemini/generations/last.jpg
+        
         Returns:
-            - 200: Image data (image/png or image/jpeg)
+            - 200: Image data (image/jpeg)
             - 204: No image generated yet
             - 503: Gemini worker not available
         
@@ -461,26 +463,20 @@ def setup_routes(debug_mode: bool = False):
             - X-State-Hash: Hash of the state snapshot used
             - X-Prompt-Hash: Hash of the prompt used for generation
         
-        Note: This endpoint is READ-ONLY and serves cached images.
+        Note: This endpoint is READ-ONLY and serves cached images from disk.
         It NEVER triggers Gemini API calls directly.
         """
-        from fastapi.responses import Response
+        from fastapi.responses import FileResponse, Response
+        import json
         
         try:
-            from living_matrix.gemini.worker import get_worker
-            worker = get_worker()
+            from living_matrix.gemini.worker import GeminiImageWorker
             
-            if not worker.is_running():
-                # Worker not started - return placeholder response
-                raise HTTPException(
-                    status_code=503,
-                    detail="Gemini image worker not running"
-                )
+            image_path = GeminiImageWorker.get_image_path()
+            metadata_path = GeminiImageWorker.get_metadata_path()
             
-            image = worker.get_latest_image()
-            
-            if image is None:
-                # No image generated yet
+            # Check if image exists on disk
+            if not image_path.exists():
                 return Response(
                     status_code=204,
                     headers={
@@ -488,19 +484,30 @@ def setup_routes(debug_mode: bool = False):
                     }
                 )
             
-            # Return the image with metadata headers
-            return Response(
-                content=image.image_data,
-                media_type=image.mime_type,
-                headers={
-                    "X-Simulation-Day": str(image.generated_at_day),
-                    "X-Simulation-Hour": str(image.generated_at_hour),
-                    "X-Simulation-Turn": str(image.generated_at_turn),
-                    "X-State-Hash": image.state_hash,
-                    "X-Prompt-Hash": image.prompt_hash,
-                    "X-Generated-At": image.generated_at_timestamp,
-                    "X-Generation-Time-Ms": str(image.generation_time_ms),
-                }
+            # Load metadata for headers
+            headers = {}
+            if metadata_path.exists():
+                try:
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+                    headers = {
+                        "X-Simulation-Day": str(metadata.get('generated_at_day', 0)),
+                        "X-Simulation-Hour": str(metadata.get('generated_at_hour', 0)),
+                        "X-Simulation-Turn": str(metadata.get('generated_at_turn', 0)),
+                        "X-State-Hash": metadata.get('state_hash', ''),
+                        "X-Prompt-Hash": metadata.get('prompt_hash', ''),
+                        "X-Generated-At": metadata.get('generated_at_timestamp', ''),
+                        "X-Generation-Time-Ms": str(metadata.get('generation_time_ms', 0)),
+                        "X-Image-Size-Bytes": str(metadata.get('image_size_bytes', 0)),
+                    }
+                except Exception:
+                    pass
+            
+            # Serve the file directly
+            return FileResponse(
+                path=str(image_path),
+                media_type="image/jpeg",
+                headers=headers
             )
             
         except ImportError:

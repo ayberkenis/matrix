@@ -184,6 +184,62 @@
 						"description": "Get culture and norms for a specific district (collectivism, obedience, aggression, risk_tolerance)"
 					},
 					"response": []
+				},
+				{
+					"name": "Get District Dynamics Status",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/districts/dynamics",
+							"host": ["{{base_url}}"],
+							"path": ["districts", "dynamics"]
+						},
+						"description": "Get global district dynamics status including wars, merges, and collapses. Returns active_districts, struggling_districts, districts_at_war, collapsed_districts, active_wars, total_wars, total_merges, total_collapses, recent_events"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Active Wars",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/districts/wars",
+							"host": ["{{base_url}}"],
+							"path": ["districts", "wars"]
+						},
+						"description": "Get list of all active wars between districts. Returns war_id, attacker, attacker_name, defender, defender_name, war_type (food_raid, territory, resource_war, ideological, retaliation), duration, intensity, casualties_attacker, casualties_defender, status"
+					},
+					"response": []
+				},
+				{
+					"name": "Get District Dynamics Detail",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/districts/region_kora/dynamics",
+							"host": ["{{base_url}}"],
+							"path": ["districts", "region_kora", "dynamics"]
+						},
+						"description": "Get dynamics detail for a specific district. Returns state (active, struggling, collapsing, collapsed, at_war, merging), struggling_turns, war_weariness, defensive_strength, offensive_strength, allies, enemies, current_war"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Collapsed Districts",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/districts/collapsed",
+							"host": ["{{base_url}}"],
+							"path": ["districts", "collapsed"]
+						},
+						"description": "Get list of collapsed district IDs. Collapsed districts are no longer active in the simulation."
+					},
+					"response": []
 				}
 			]
 		},
