@@ -749,6 +749,43 @@ class WorldDynamicsSystem:
             self.districts, agents_by_district, turn
         )
         
+        # Handle create_district_request events
+        filtered_events = []
+        for event in events:
+            if event[0] == "create_district_request":
+                # Parse the request: CREATE:proposal_id:name:pioneer_count:source_district_id
+                parts = event[1].split(":")
+                if len(parts) >= 5 and parts[0] == "CREATE":
+                    proposal_id = parts[1]
+                    new_name = parts[2]
+                    pioneer_count = int(parts[3])
+                    source_id = parts[4]
+                    
+                    # Generate new district ID
+                    new_id = f"region_{new_name.lower().replace(' ', '_').replace("'", '')}"
+                    
+                    # Get initial resources from proposal
+                    proposal = self.district_dynamics.pending_new_districts.get(proposal_id)
+                    if proposal:
+                        initial_food = proposal.initial_resources.get("food", 100.0)
+                        initial_credits = proposal.initial_resources.get("credits", 50.0)
+                    else:
+                        initial_food = 100.0
+                        initial_credits = 50.0
+                    
+                    # Create the district
+                    self.create_new_district(
+                        district_id=new_id,
+                        district_name=new_name,
+                        initial_food=initial_food,
+                        initial_credits=initial_credits,
+                        source_district_id=source_id
+                    )
+                # Don't include create_district_request in returned events
+            else:
+                filtered_events.append(event)
+        events = filtered_events
+        
         # Sync district state with dynamics system
         for district_id, district in self.districts.items():
             dyn_state = self.district_dynamics.get_district_state(district_id)
@@ -848,3 +885,60 @@ class WorldDynamicsSystem:
         
         events = self.district_dynamics._start_war(attacker_id, defender_id, self.districts)
         return len(events) > 0
+    
+    def create_new_district(self, district_id: str, district_name: str, 
+                            initial_food: float = 100.0, initial_credits: float = 50.0,
+                            source_district_id: str = None) -> bool:
+        """
+        Create a new district (typically from expansion).
+        
+        Args:
+            district_id: Unique ID for the new district
+            district_name: Display name for the district
+            initial_food: Starting food stock
+            initial_credits: Starting credits pool
+            source_district_id: ID of district pioneers came from (optional)
+            
+        Returns:
+            True if district was created successfully
+        """
+        if district_id in self.districts:
+            logger.warning(f"District {district_id} already exists")
+            return False
+        
+        # Create the new district
+        district = AdvancedDistrict(
+            district_id=district_id,
+            district_name=district_name,
+            food_stock=initial_food,
+            food_capacity=500.0,
+            credits_pool=initial_credits,
+            jobs_available=2,  # Start with few jobs
+            security_level=50.0,  # Lower security initially
+            production_rate=0.8,  # Lower productivity initially
+            workplace_count=1,
+            ideal_food=50.0,
+            ideal_jobs=5
+        )
+        
+        # Initialize culture (slightly different from source if available)
+        self.culture_system.initialize_district_culture(district_id)
+        district.culture = self.culture_system.get_culture(district_id)
+        
+        # Add to districts
+        self.districts[district_id] = district
+        
+        # Initialize district dynamics state
+        self.district_dynamics.initialize_district(district_id)
+        
+        logger.info(f"NEW DISTRICT CREATED: {district_name} ({district_id})")
+        
+        return True
+    
+    def get_pending_new_districts(self) -> List[Dict]:
+        """Get list of pending new district proposals."""
+        return self.district_dynamics.get_pending_districts()
+    
+    def get_new_district_history(self) -> List[Dict]:
+        """Get history of established new districts."""
+        return self.district_dynamics.get_established_districts_history()

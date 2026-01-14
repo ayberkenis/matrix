@@ -94,6 +94,21 @@ class DistrictCollapse:
 
 
 @dataclass
+class NewDistrictProposal:
+    """Represents a proposal to create a new district."""
+    proposal_id: str
+    source_district_id: str  # District the pioneers come from
+    proposed_name: str
+    pioneer_count: int  # Number of agents moving to new district
+    proposed_turn: int
+    establishment_turn: int  # When the district will be fully established
+    founding_agent_ids: List[str] = field(default_factory=list)
+    initial_resources: Dict[str, float] = field(default_factory=dict)
+    is_established: bool = False
+    reason: str = ""  # Why the new district is being created
+
+
+@dataclass
 class DistrictDynamicsState:
     """Extended state for district dynamics."""
     state: DistrictState = DistrictState.ACTIVE
@@ -119,6 +134,22 @@ WAR_COOLDOWN_TURNS = 30                 # Min turns between wars
 WAR_MAX_DURATION = 50                   # Max war duration
 WAR_MIN_POPULATION_TO_ATTACK = 30       # Need this many people to start war
 RAID_SUCCESS_FOOD_FRACTION = 0.3        # Fraction of food stolen in raid
+
+# SAFETY MEASURES - Prevent total collapse
+MIN_ACTIVE_DISTRICTS = 3               # At least this many districts must remain active
+COLLAPSE_COOLDOWN_TURNS = 50           # Minimum turns between collapses (prevent cascade)
+PROTECTED_DISTRICT_RATIO = 0.3         # Top 30% districts by population are protected
+RECOVERY_CHANCE_PER_TURN = 0.05        # 5% chance per turn for struggling district to recover
+EMERGENCY_AID_THRESHOLD = 0.5          # If 50%+ districts struggling, trigger emergency aid
+
+# NEW DISTRICT CREATION
+NEW_DISTRICT_MIN_POPULATION = 50       # Min agents to establish a new district
+NEW_DISTRICT_PIONEER_THRESHOLD = 0.1   # 10% of overflow population becomes pioneers
+NEW_DISTRICT_CROWDING_THRESHOLD = 150  # District considered crowded at this population
+NEW_DISTRICT_COOLDOWN_TURNS = 100      # Minimum turns between new district creations
+MAX_TOTAL_DISTRICTS = 20               # Maximum number of districts allowed
+NEW_DISTRICT_INITIAL_FOOD = 100.0      # Starting food for new district
+NEW_DISTRICT_INITIAL_CREDITS = 50.0    # Starting credits for new district
 
 
 class DistrictDynamicsSystem:
@@ -146,6 +177,17 @@ class DistrictDynamicsSystem:
         
         # Turn counter
         self.current_turn: int = 0
+        
+        # SAFETY MEASURES
+        self.last_collapse_turn: int = -COLLAPSE_COOLDOWN_TURNS  # Allow first collapse
+        self.protected_districts: Set[str] = set()  # Districts protected from collapse
+        self.emergency_aid_active: bool = False  # Emergency aid mode
+        
+        # NEW DISTRICT CREATION
+        self.pending_new_districts: Dict[str, NewDistrictProposal] = {}
+        self.established_districts: List[NewDistrictProposal] = []  # History
+        self.last_district_creation_turn: int = -NEW_DISTRICT_COOLDOWN_TURNS
+        self.next_district_id: int = 100  # For generating unique IDs
     
     def initialize_district(self, district_id: str):
         """Initialize dynamics state for a district."""
@@ -209,6 +251,14 @@ class DistrictDynamicsSystem:
         # Phase 7: Advance pending collapses
         collapse_progress_events = self._advance_collapses(districts, agents_by_district)
         events.extend(collapse_progress_events)
+        
+        # Phase 8: Check for new district opportunities
+        new_district_events = self._check_new_district_opportunities(districts, agents_by_district)
+        events.extend(new_district_events)
+        
+        # Phase 9: Advance pending new districts
+        establish_events = self._advance_new_districts(districts)
+        events.extend(establish_events)
         
         # Store events
         for event in events:
@@ -703,10 +753,122 @@ class DistrictDynamicsSystem:
         
         return events
     
+    def _update_protected_districts(self, districts: Dict, 
+                                     agents_by_district: Dict[str, int]) -> None:
+        """
+        Update the set of protected districts based on population.
+        
+        Top districts by population are protected from collapse.
+        """
+        # Sort districts by population (descending)
+        sorted_districts = sorted(
+            districts.keys(),
+            key=lambda d: agents_by_district.get(d, 0),
+            reverse=True
+        )
+        
+        # Protect top N districts
+        num_protected = max(MIN_ACTIVE_DISTRICTS, int(len(sorted_districts) * PROTECTED_DISTRICT_RATIO))
+        self.protected_districts = set(sorted_districts[:num_protected])
+    
+    def _check_emergency_aid(self, districts: Dict, 
+                             agents_by_district: Dict[str, int]) -> List[Tuple[str, str, str]]:
+        """
+        Check if emergency aid should be activated.
+        
+        Triggers when too many districts are struggling.
+        """
+        events = []
+        
+        struggling_count = sum(
+            1 for state in self.district_states.values()
+            if state.state == DistrictState.STRUGGLING
+        )
+        total_active = sum(
+            1 for state in self.district_states.values()
+            if state.state not in [DistrictState.COLLAPSED, DistrictState.COLLAPSING]
+        )
+        
+        if total_active == 0:
+            return events
+        
+        struggling_ratio = struggling_count / total_active
+        
+        if struggling_ratio >= EMERGENCY_AID_THRESHOLD and not self.emergency_aid_active:
+            self.emergency_aid_active = True
+            events.append(("emergency_aid_activated",
+                "Emergency aid activated! Resources are being distributed to struggling districts.",
+                "global"))
+            logger.info("EMERGENCY AID: Activated due to high struggling ratio")
+            
+            # Distribute resources from healthy districts to struggling ones
+            for district_id, district in districts.items():
+                state = self.get_district_state(district_id)
+                if state.state == DistrictState.STRUGGLING:
+                    # Boost food by 20%
+                    aid_amount = 20.0
+                    district.food_stock += aid_amount
+                    state.struggling_turns = max(0, state.struggling_turns - 5)
+                    
+        elif struggling_ratio < EMERGENCY_AID_THRESHOLD * 0.5 and self.emergency_aid_active:
+            self.emergency_aid_active = False
+            events.append(("emergency_aid_ended",
+                "Emergency aid has ended. Districts are recovering.",
+                "global"))
+            logger.info("EMERGENCY AID: Deactivated - situation improving")
+        
+        return events
+    
+    def _try_recovery(self, district_id: str, district, 
+                      agents_by_district: Dict[str, int]) -> List[Tuple[str, str, str]]:
+        """
+        Try to recover a struggling district.
+        
+        Random chance to recover each turn, increased if emergency aid is active.
+        """
+        events = []
+        state = self.get_district_state(district_id)
+        
+        if state.state != DistrictState.STRUGGLING:
+            return events
+        
+        # Higher recovery chance with emergency aid
+        recovery_chance = RECOVERY_CHANCE_PER_TURN
+        if self.emergency_aid_active:
+            recovery_chance *= 2
+        
+        # Higher recovery chance if population is growing
+        pop = agents_by_district.get(district_id, 0)
+        if pop > COLLAPSE_POPULATION_THRESHOLD * 3:
+            recovery_chance *= 1.5
+        
+        if self.rng.random() < recovery_chance:
+            state.state = DistrictState.ACTIVE
+            state.struggling_turns = 0
+            events.append(("district_recovered",
+                f"{district.district_name} has recovered from its crisis!",
+                district_id))
+            logger.info(f"RECOVERY: {district_id} recovered from struggling state")
+        
+        return events
+    
     def _check_collapse_conditions(self, districts: Dict, 
                                    agents_by_district: Dict[str, int]) -> List[Tuple[str, str, str]]:
         """Check if any district should collapse."""
         events = []
+        
+        # Update protected districts first
+        self._update_protected_districts(districts, agents_by_district)
+        
+        # Check for emergency aid
+        aid_events = self._check_emergency_aid(districts, agents_by_district)
+        events.extend(aid_events)
+        
+        # Count active districts
+        active_districts = sum(
+            1 for state in self.district_states.values()
+            if state.state not in [DistrictState.COLLAPSED, DistrictState.COLLAPSING]
+        )
         
         for district_id, district in districts.items():
             state = self.get_district_state(district_id)
@@ -716,6 +878,26 @@ class DistrictDynamicsSystem:
             if state.state in [DistrictState.COLLAPSING, DistrictState.COLLAPSED]:
                 continue
             
+            # Try recovery for struggling districts
+            recovery_events = self._try_recovery(district_id, district, agents_by_district)
+            events.extend(recovery_events)
+            if recovery_events:
+                continue  # Recovered, skip collapse check
+            
+            # SAFETY CHECK 1: Minimum active districts
+            if active_districts <= MIN_ACTIVE_DISTRICTS:
+                continue  # Cannot collapse, too few districts
+            
+            # SAFETY CHECK 2: Collapse cooldown
+            if self.current_turn - self.last_collapse_turn < COLLAPSE_COOLDOWN_TURNS:
+                continue  # Too soon since last collapse
+            
+            # SAFETY CHECK 3: Protected districts
+            if district_id in self.protected_districts:
+                # Protected districts only collapse under extreme conditions
+                if pop > 0 and district.food_stock > 0:
+                    continue  # Protected and has resources
+            
             # Check collapse conditions
             should_collapse = False
             reason = ""
@@ -724,8 +906,10 @@ class DistrictDynamicsSystem:
                 should_collapse = True
                 reason = f"Population too low ({pop} residents)"
             elif district.food_stock < COLLAPSE_FOOD_THRESHOLD and pop > 0:
-                should_collapse = True
-                reason = f"Starvation (no food)"
+                # Give struggling districts a chance to recover before collapsing
+                if state.struggling_turns > STRUGGLING_TURNS_TO_COLLAPSE:
+                    should_collapse = True
+                    reason = f"Starvation (no food for too long)"
             elif district.tension_state.tension > COLLAPSE_TENSION_THRESHOLD:
                 if state.struggling_turns > STRUGGLING_TURNS_TO_COLLAPSE:
                     should_collapse = True
@@ -735,6 +919,10 @@ class DistrictDynamicsSystem:
                 reason = "Extended period of struggle"
             
             if should_collapse:
+                # Record collapse turn for cooldown
+                self.last_collapse_turn = self.current_turn
+                active_districts -= 1  # Decrease count for this loop
+                
                 collapse_events = self._start_collapse(district_id, district, reason, 
                                                        districts, agents_by_district)
                 events.extend(collapse_events)
@@ -838,6 +1026,208 @@ class DistrictDynamicsSystem:
         
         return events
     
+    def _check_new_district_opportunities(self, districts: Dict,
+                                          agents_by_district: Dict[str, int]) -> List[Tuple[str, str, str]]:
+        """
+        Check if conditions are right to establish a new district.
+        
+        New districts can form when:
+        1. Existing districts are crowded
+        2. There's enough population to support pioneers
+        3. Cooldown has passed
+        4. Max districts not reached
+        """
+        events = []
+        
+        # Count active districts
+        active_count = sum(
+            1 for state in self.district_states.values()
+            if state.state not in [DistrictState.COLLAPSED, DistrictState.COLLAPSING]
+        )
+        
+        # Check if we've hit max districts
+        if active_count >= MAX_TOTAL_DISTRICTS:
+            return events
+        
+        # Check cooldown
+        if self.current_turn - self.last_district_creation_turn < NEW_DISTRICT_COOLDOWN_TURNS:
+            return events
+        
+        # Already have pending proposals
+        if self.pending_new_districts:
+            return events
+        
+        # Find crowded districts with expansion potential
+        for district_id, district in districts.items():
+            state = self.get_district_state(district_id)
+            pop = agents_by_district.get(district_id, 0)
+            
+            # Skip struggling/collapsed districts
+            if state.state != DistrictState.ACTIVE:
+                continue
+            
+            # Check if crowded
+            if pop < NEW_DISTRICT_CROWDING_THRESHOLD:
+                continue
+            
+            # Check if district has enough resources to support expansion
+            if district.food_stock < NEW_DISTRICT_INITIAL_FOOD * 1.5:
+                continue
+            
+            # Low tension makes expansion more likely
+            if district.tension_state.tension > 50:
+                continue
+            
+            # Calculate pioneer count
+            overflow = pop - NEW_DISTRICT_CROWDING_THRESHOLD
+            pioneer_count = max(NEW_DISTRICT_MIN_POPULATION, int(overflow * NEW_DISTRICT_PIONEER_THRESHOLD))
+            
+            # Enough pioneers to establish a new district
+            if pioneer_count >= NEW_DISTRICT_MIN_POPULATION:
+                # Create proposal
+                proposal_events = self._propose_new_district(
+                    district_id, district, pioneer_count, pop
+                )
+                events.extend(proposal_events)
+                break  # Only one proposal at a time
+        
+        return events
+    
+    def _propose_new_district(self, source_district_id: str, source_district,
+                               pioneer_count: int, source_pop: int) -> List[Tuple[str, str, str]]:
+        """Create a proposal for a new district."""
+        events = []
+        
+        # Generate unique district name
+        new_district_id = f"region_new_{self.next_district_id}"
+        self.next_district_id += 1
+        
+        # Generate name from source
+        source_name = source_district.district_name
+        new_name = f"New {source_name[:4]}"
+        
+        # Alternative names based on context
+        name_options = [
+            f"{source_name} Frontier",
+            f"Pioneer's Rest",
+            f"New Horizon",
+            f"Freedom Valley",
+            f"Settler's Hope",
+            f"Expansion Point",
+        ]
+        new_name = self.rng.choice(name_options)
+        
+        proposal_id = f"proposal_{self.current_turn}_{new_district_id}"
+        
+        # Calculate resources pioneers take with them
+        resource_fraction = pioneer_count / source_pop
+        initial_food = min(
+            source_district.food_stock * resource_fraction * 0.5,
+            NEW_DISTRICT_INITIAL_FOOD
+        )
+        initial_credits = min(
+            source_district.credits_pool * resource_fraction * 0.3,
+            NEW_DISTRICT_INITIAL_CREDITS
+        )
+        
+        proposal = NewDistrictProposal(
+            proposal_id=proposal_id,
+            source_district_id=source_district_id,
+            proposed_name=new_name,
+            pioneer_count=pioneer_count,
+            proposed_turn=self.current_turn,
+            establishment_turn=self.current_turn + 10,  # 10 turns to establish
+            initial_resources={
+                "food": initial_food,
+                "credits": initial_credits
+            },
+            reason=f"Expansion from crowded {source_district.district_name}"
+        )
+        
+        self.pending_new_districts[proposal_id] = proposal
+        
+        events.append(("new_district_proposed",
+            f"{pioneer_count} pioneers from {source_district.district_name} set out to establish {new_name}!",
+            source_district_id))
+        
+        logger.info(f"NEW DISTRICT PROPOSAL: {new_name} with {pioneer_count} pioneers from {source_district_id}")
+        
+        return events
+    
+    def _advance_new_districts(self, districts: Dict) -> List[Tuple[str, str, str]]:
+        """Advance pending new district proposals."""
+        events = []
+        completed_proposals = []
+        
+        for proposal_id, proposal in self.pending_new_districts.items():
+            if proposal.is_established:
+                continue
+            
+            if self.current_turn >= proposal.establishment_turn:
+                # Establish the new district
+                proposal.is_established = True
+                completed_proposals.append(proposal_id)
+                
+                # Create new district in world dynamics
+                # This returns the event for the caller to handle the actual creation
+                events.append(("new_district_established",
+                    f"{proposal.proposed_name} has been established! {proposal.pioneer_count} settlers begin their new life.",
+                    proposal.source_district_id))
+                
+                # Reduce source district resources
+                if proposal.source_district_id in districts:
+                    source = districts[proposal.source_district_id]
+                    source.food_stock -= proposal.initial_resources.get("food", 0)
+                    source.credits_pool -= proposal.initial_resources.get("credits", 0)
+                
+                # Record creation turn
+                self.last_district_creation_turn = self.current_turn
+                self.established_districts.append(proposal)
+                
+                # Add to pending list for external system to handle creation
+                events.append(("create_district_request", 
+                    f"CREATE:{proposal.proposal_id}:{proposal.proposed_name}:{proposal.pioneer_count}:{proposal.source_district_id}",
+                    "system"))
+                
+                logger.info(f"NEW DISTRICT ESTABLISHED: {proposal.proposed_name}")
+        
+        # Clean up completed proposals
+        for proposal_id in completed_proposals:
+            del self.pending_new_districts[proposal_id]
+        
+        return events
+    
+    def get_pending_districts(self) -> List[Dict]:
+        """Get list of pending new district proposals."""
+        return [
+            {
+                "proposal_id": p.proposal_id,
+                "source_district": p.source_district_id,
+                "name": p.proposed_name,
+                "pioneer_count": p.pioneer_count,
+                "proposed_turn": p.proposed_turn,
+                "establishment_turn": p.establishment_turn,
+                "turns_remaining": max(0, p.establishment_turn - self.current_turn),
+                "initial_resources": p.initial_resources,
+                "reason": p.reason
+            }
+            for p in self.pending_new_districts.values()
+            if not p.is_established
+        ]
+    
+    def get_established_districts_history(self) -> List[Dict]:
+        """Get history of established districts."""
+        return [
+            {
+                "name": p.proposed_name,
+                "source_district": p.source_district_id,
+                "pioneer_count": p.pioneer_count,
+                "established_turn": p.establishment_turn,
+                "reason": p.reason
+            }
+            for p in self.established_districts
+        ]
+    
     def get_war_status(self, district_id: str) -> Optional[Dict]:
         """Get current war status for a district."""
         for war in self.active_wars.values():
@@ -879,6 +1269,16 @@ class DistrictDynamicsSystem:
         collapsed = sum(1 for s in self.district_states.values() 
                        if s.state == DistrictState.COLLAPSED)
         
+        # Calculate turns until next collapse is allowed
+        turns_until_collapse_allowed = max(0, 
+            COLLAPSE_COOLDOWN_TURNS - (self.current_turn - self.last_collapse_turn)
+        )
+        
+        # Calculate turns until next district can be created
+        turns_until_new_district = max(0,
+            NEW_DISTRICT_COOLDOWN_TURNS - (self.current_turn - self.last_district_creation_turn)
+        )
+        
         return {
             "active_districts": active_districts,
             "struggling_districts": struggling,
@@ -888,5 +1288,15 @@ class DistrictDynamicsSystem:
             "total_wars": len(self.war_history),
             "total_merges": len(self.merge_history),
             "total_collapses": len(self.collapse_history),
-            "recent_events": list(self.recent_events)[-10:]
+            "recent_events": list(self.recent_events)[-10:],
+            # Safety measures status
+            "protected_districts": list(self.protected_districts),
+            "emergency_aid_active": self.emergency_aid_active,
+            "collapse_cooldown_remaining": turns_until_collapse_allowed,
+            "min_districts_enforced": MIN_ACTIVE_DISTRICTS,
+            # New district creation status
+            "pending_new_districts": self.get_pending_districts(),
+            "total_districts_established": len(self.established_districts),
+            "new_district_cooldown_remaining": turns_until_new_district,
+            "max_districts": MAX_TOTAL_DISTRICTS
         }

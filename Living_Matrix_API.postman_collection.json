@@ -240,6 +240,34 @@
 						"description": "Get list of collapsed district IDs. Collapsed districts are no longer active in the simulation."
 					},
 					"response": []
+				},
+				{
+					"name": "Get Pending New Districts",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/districts/pending",
+							"host": ["{{base_url}}"],
+							"path": ["districts", "pending"]
+						},
+						"description": "Get list of pending new district proposals being established by pioneers from crowded districts. Returns proposal_id, source_district, name, pioneer_count, turns_remaining, initial_resources, reason"
+					},
+					"response": []
+				},
+				{
+					"name": "Get New District History",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/districts/history",
+							"host": ["{{base_url}}"],
+							"path": ["districts", "history"]
+						},
+						"description": "Get history of newly established districts created through expansion."
+					},
+					"response": []
 				}
 			]
 		},

@@ -667,4 +667,45 @@ def setup_routes(debug_mode: bool = False):
         
         return {"collapsed": sim.world_dynamics_system.get_collapsed_districts()}
     
+    @router.get("/districts/pending")
+    async def get_pending_districts():
+        """
+        Get list of pending new district proposals.
+        
+        Shows districts being established by pioneers from crowded districts.
+        
+        Returns:
+            - proposal_id: Unique ID of the proposal
+            - source_district: District the pioneers came from
+            - name: Proposed name for the new district
+            - pioneer_count: Number of settlers
+            - turns_remaining: Turns until establishment
+            - initial_resources: Food and credits being brought
+            - reason: Why the new district is being created
+        """
+        sim = get_simulation()
+        if not sim or not hasattr(sim, 'world_dynamics_system'):
+            raise HTTPException(status_code=503, detail="Simulation not running")
+        
+        if not sim.world_dynamics_system:
+            return {"pending": []}
+        
+        return {"pending": sim.world_dynamics_system.get_pending_new_districts()}
+    
+    @router.get("/districts/history")
+    async def get_new_district_history():
+        """
+        Get history of newly established districts.
+        
+        Shows all districts that were created through expansion.
+        """
+        sim = get_simulation()
+        if not sim or not hasattr(sim, 'world_dynamics_system'):
+            raise HTTPException(status_code=503, detail="Simulation not running")
+        
+        if not sim.world_dynamics_system:
+            return {"history": []}
+        
+        return {"history": sim.world_dynamics_system.get_new_district_history()}
+    
     return router
