@@ -1,11 +1,16 @@
 """HumanAgent model with needs, goals, traits, inventory, and conflict resolution."""
 
 import random
+import time
 from typing import List, Dict, Optional, Tuple
 from collections import deque
 from living_matrix.dataclasses import (
     HumanNeeds, HumanTraits, HumanInventory, HumanAgent
 )
+
+# DEBUG PROFILING: Import profiler for performance analysis
+# Enable via: LM_DEBUG_PROFILE=true environment variable
+from living_matrix.utils.debug_profiler import get_profiler, is_profiling_enabled
 from living_matrix.beliefs import BeliefSystem
 from living_matrix.dataclasses import Belief
 from living_matrix.relationships_enhanced import RelationshipSystem
@@ -400,7 +405,7 @@ class HumanAgentSystem:
                      population_pressure: float = 0.0) -> str:
         """
         Decide action using utility function, influenced by relationships, beliefs, and survival drives.
-        Returns action type: "move", "work", "trade", "rest", "socialize", "help", "theft", "idle"
+        Returns action type: "move", "work", "trade", "rest", "socialize", "help", "theft", "idle", "farm", "hunt"
         
         HOT PATH - CALLED PER AGENT PER TICK
         """
@@ -479,6 +484,38 @@ class HumanAgentSystem:
             if _res_get("jobs_available", 0) > 0:
                 work_score += 10
             action_scores["work"] = work_score
+        
+        # Farm action - farmers prioritize farming, others farm when hungry and no food
+        food_stock = _res_get("food_stock", 50)
+        food_per_capita = food_stock / max(1, _res_get("population", 100))
+        food_scarcity = food_per_capita < 1.0
+        
+        if _agent_role == 'farmer':
+            # Farmers farm as their primary activity
+            farm_score = 40 + purpose * 0.3 + ambition * 10
+            if food_scarcity:
+                farm_score += 30  # More urgent when food is low
+            if hunger > 50:
+                farm_score += 20  # Personal hunger motivation
+            if rest < 80:  # Not too tired
+                action_scores["farm"] = farm_score
+        elif food_scarcity and hunger > 60 and rest < 70:
+            # Non-farmers consider farming when desperate
+            action_scores["farm"] = 15 + hunger * 0.3
+        
+        # Hunt action - hunters prioritize hunting, others hunt when food is very scarce
+        if _agent_role == 'hunter':
+            # Hunters hunt as their primary activity
+            hunt_score = 35 + _traits.risk * 15 + ambition * 10
+            if food_scarcity:
+                hunt_score += 25
+            if hunger > 50:
+                hunt_score += 15
+            if rest < 80:
+                action_scores["hunt"] = hunt_score
+        elif food_scarcity and hunger > 70 and _traits.risk > 0.5:
+            # Non-hunters consider hunting when desperate and brave
+            action_scores["hunt"] = 10 + hunger * 0.2 + _traits.risk * 10
         
         # Socialize action
         if belonging < 50:
@@ -576,6 +613,66 @@ class HumanAgentSystem:
                     _needs.rest = min(100, _needs.rest + 10)
                     return (f"{_name} struggles with work", "work")
             return (f"{_name} looks for work but finds none", None)
+        
+        elif action == "farm":
+            # Farming produces food for the district
+            base_food = 3  # Base food production
+            skill_bonus = 1.5 if agent.role == 'farmer' else 1.0
+            weather_bonus = district_resources.get("weather_farm_modifier", 1.0)
+            success_chance = 0.8 + _traits.patience * 0.15 - (_needs.rest / 100.0) * 0.2
+            
+            if _random() < success_chance:
+                food_produced = int(base_food * skill_bonus * weather_bonus * _random() * 0.4 + base_food * skill_bonus * weather_bonus * 0.8)
+                food_produced = max(1, food_produced)
+                
+                # Add food to district
+                current_food = district_resources.get("food_stock", 0)
+                max_food = district_resources.get("food_capacity", 1000)
+                district_resources["food_stock"] = min(max_food, current_food + food_produced)
+                
+                # Agent benefits
+                _needs.purpose = max(0, _needs.purpose - 10)
+                _needs.rest = min(100, _needs.rest + 8)
+                _inventory.food += 1  # Keep a bit for self
+                
+                return (f"{_name} farms and produces {food_produced} food", "farm")
+            else:
+                _needs.rest = min(100, _needs.rest + 5)
+                return (f"{_name} works the fields but yields little", "farm")
+        
+        elif action == "hunt":
+            # Hunting produces food for the district (riskier but can yield more)
+            base_food = 2
+            skill_bonus = 1.3 if agent.role == 'hunter' else 1.0
+            weather_bonus = district_resources.get("weather_hunt_modifier", 1.0)
+            
+            # Hunting success depends on risk-taking and rest
+            success_chance = 0.6 + _traits.risk * 0.25 - (_needs.rest / 100.0) * 0.3
+            
+            if _random() < success_chance:
+                # Hunters can get big catches
+                food_produced = _randint(1, int(5 * skill_bonus * weather_bonus))
+                food_produced = max(1, food_produced)
+                
+                # Add food to district
+                current_food = district_resources.get("food_stock", 0)
+                max_food = district_resources.get("food_capacity", 1000)
+                district_resources["food_stock"] = min(max_food, current_food + food_produced)
+                
+                # Agent benefits
+                _needs.purpose = max(0, _needs.purpose - 8)
+                _needs.rest = min(100, _needs.rest + 10)
+                _inventory.food += 1
+                
+                return (f"{_name} hunts successfully and brings {food_produced} food", "hunt")
+            else:
+                # Failed hunt is tiring
+                _needs.rest = min(100, _needs.rest + 15)
+                # Small chance of injury from failed hunt
+                if _random() < 0.1:
+                    _needs.safety = min(100, _needs.safety + 10)
+                    return (f"{_name} returns from a failed hunt, slightly injured", "hunt")
+                return (f"{_name} returns from an unsuccessful hunt", "hunt")
         
         elif action == "trade":
             if _inventory.credits >= 5 and district_resources.get("food_stock", 0) > 0:
@@ -946,6 +1043,11 @@ class HumanAgentSystem:
         - If LEARNING_ENABLED: Uses memory manager for micro-memory and district learning
         - If LEARNING_DISABLED: Behavior is BIT-FOR-BIT identical to baseline
         """
+        # DEBUG PROFILING: Get profiler for detailed timing
+        _profiler = get_profiler()
+        _profiler.start_phase("human_agent_advance")
+        _advance_start = time.perf_counter()
+        
         # PERF CRITICAL: Hoist frequently used methods and attributes
         # Reduces attribute lookup overhead in tight loops
         _agents = self.agents
@@ -1011,6 +1113,9 @@ class HumanAgentSystem:
                     agent.must_attempt_reproduction = True  # HARD CONSTRAINT - not a choice
                 else:
                     agent.must_attempt_reproduction = False
+        
+        # DEBUG PROFILING: Start aging phase timing
+        _profiler.start_phase("aging_death_phase")
         
         # Age agents and handle death
         # REQUIRED FIX 1: Minimum Viable Population Guard (Hard Rule)
@@ -1125,6 +1230,11 @@ class HumanAgentSystem:
         # OPTIMIZATION 1: Update cached agents_list (remove dead agents)
         agents_list = [a for a in agents_list if a.is_alive]
         
+        _profiler.end_phase("aging_death_phase")
+        
+        # DEBUG PROFILING: Start reproduction phase timing
+        _profiler.start_phase("reproduction_phase")
+        
         # OPTIMIZATION: Skip reproduction check more frequently for large populations (performance)
         # This reduces computation significantly while maintaining growth patterns
         check_reproduction_this_turn = True
@@ -1217,6 +1327,11 @@ class HumanAgentSystem:
         # OPTIMIZATION 3: Update spatial index from agents_list
         self.spatial_index.update_from_agents_list(agents_list)
         
+        _profiler.end_phase("reproduction_phase")
+        
+        # DEBUG PROFILING: Start relationship update phase timing
+        _profiler.start_phase("relationship_update_phase")
+        
         # OPTIMIZATION 2: Batch relationship updates - skip for large populations
         # Only update relationships every N ticks based on population size
         # Also sample agents for very large populations
@@ -1267,6 +1382,11 @@ class HumanAgentSystem:
         # OPTIMIZATION: Cache expensive calculations
         district_tension = district_resources.get("tension", 0) / 100.0
         nearby_conflicts = sum(1 for e in events if "conflict" in str(e[2]))
+        
+        _profiler.end_phase("relationship_update_phase")
+        
+        # DEBUG PROFILING: Start agent action phase timing
+        _profiler.start_phase("agent_action_phase")
         
         # PERFORMANCE: Update tier assignments for stratified simulation
         # This separates agents into active (fully simulated) and inactive (statistical update) tiers
@@ -1357,6 +1477,11 @@ class HumanAgentSystem:
                 agent.needs.belonging = max(0, agent.needs.belonging - 0.25)
                 agent.last_action_turn += 1
         
+        _profiler.end_phase("agent_action_phase")
+        
+        # DEBUG PROFILING: Start conflict phase timing
+        _profiler.start_phase("conflict_phase")
+        
         # OPTIMIZATION: Skip conflict checks for very large populations (expensive O(n²) operation)
         # Check conflicts less frequently for large populations
         check_conflicts_this_turn = True
@@ -1412,6 +1537,26 @@ class HumanAgentSystem:
             
             # Flush all pending writes
             _memory_manager.end_tick()
+        
+        _profiler.end_phase("conflict_phase")
+        
+        # DEBUG PROFILING: End human agent advance phase and record events
+        _profiler.record_events(
+            births=births_count,
+            deaths=deaths_count_final,
+            promotions=promotions_count,
+            conflicts=conflict_count
+        )
+        _profiler.end_phase("human_agent_advance")
+        
+        # DEBUG PROFILING: Log timing summary if enabled
+        _advance_duration_ms = (time.perf_counter() - _advance_start) * 1000
+        if is_profiling_enabled() and _advance_duration_ms > 500:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[SLOW] HumanAgentSystem.advance() took {_advance_duration_ms:.1f}ms "
+                f"(agents={alive_count}, events={len(events)})"
+            )
         
         return events
     

@@ -86,14 +86,14 @@ class GeminiImageWorker:
     """
     
     # Wall-clock rate limiting: 1 image per real-world hour (3600 seconds)
-    MIN_SECONDS_BETWEEN_GENERATIONS = 600  # 10 minutes in seconds
+    MIN_SECONDS_BETWEEN_GENERATIONS = 720  # 12 hours in seconds
     
     # Minimum simulation turn before first image generation (let simulation warm up)
     MIN_TURN_FOR_FIRST_IMAGE = 50
     
     # Backoff settings for rate limit errors
     INITIAL_BACKOFF_SECONDS = 60
-    MAX_BACKOFF_SECONDS = 600  # 10 minutes max
+    MAX_BACKOFF_SECONDS = 7200  # 12 hours max
     
     def __init__(self):
         """Initialize the worker."""

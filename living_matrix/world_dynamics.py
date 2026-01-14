@@ -1,13 +1,26 @@
-"""Advanced world dynamics: pressure signals, tension as stored energy, events, psychology."""
+"""Advanced world dynamics: pressure signals, tension as stored energy, events, psychology.
+
+Features:
+- Pressure signals (food, jobs, weather, migration, rumor, inequality)
+- Multi-dimensional tension (economic, social, political, existential)
+- District events (riots, strikes, migrations, shutdowns)
+- District dynamics (collapse, merging, wars between districts)
+"""
 
 import random
-from typing import Dict, List, Optional, Tuple
+import logging
+from typing import Dict, List, Optional, Tuple, Set, Any
 from dataclasses import dataclass, field
 from collections import deque
 from enum import Enum
 from living_matrix.tension import Tension as MultiTension
 from living_matrix.dataclasses import Intent
 from living_matrix.culture import Culture, CultureSystem
+from living_matrix.district_dynamics import (
+    DistrictDynamicsSystem, DistrictState, DistrictDynamicsState,
+    DistrictWar, WarType
+)
+logger = logging.getLogger(__name__)
 
 
 class EventType(Enum):
@@ -153,6 +166,22 @@ class AdvancedDistrict:
     active_agents: int = 0  # Number of active agents in this district
     total_population: int = 0  # active_agents + child_pool
     population_pressure: float = 0.0  # 0..1 (pressure from population size vs resources)
+    
+    # AGENT-DRIVEN FOOD SYSTEM
+    food_capacity: float = 500.0  # Dynamic max food storage
+    population: int = 0  # Current total population (for agent decisions)
+    weather_farm_modifier: float = 1.0  # Weather impact on farming
+    weather_hunt_modifier: float = 1.0  # Weather impact on hunting
+    
+    # DISTRICT DYNAMICS: State, wars, alliances
+    dynamics_state: DistrictState = DistrictState.ACTIVE
+    is_at_war: bool = False
+    war_opponent: Optional[str] = None
+    war_casualties: int = 0
+    allies: Set[str] = field(default_factory=set)
+    enemies: Set[str] = field(default_factory=set)
+    is_collapsed: bool = False
+    collapse_reason: Optional[str] = None
 
 
 class WorldDynamicsSystem:
@@ -166,13 +195,19 @@ class WorldDynamicsSystem:
         self.global_turn: int = 0
         self.culture_system = CultureSystem(seed=seed)
         
+        # DISTRICT DYNAMICS: Wars, mergers, collapses
+        self.district_dynamics = DistrictDynamicsSystem(seed=seed)
+        
         # Initialize districts
         for district_id in districts:
             district_name = district_id.replace("region_", "").title()
+            # Start with reasonable food supply
+            initial_food = random.uniform(150, 300)  # Enough for ~50-100 agents initially
             district = AdvancedDistrict(
                 district_id=district_id,
                 district_name=district_name,
-                food_stock=random.uniform(30, 70),
+                food_stock=initial_food,
+                food_capacity=500.0,  # Will be dynamically adjusted
                 credits_pool=random.uniform(50, 150),
                 jobs_available=random.randint(3, 8),
                 security_level=random.uniform(60, 90),
@@ -185,6 +220,9 @@ class WorldDynamicsSystem:
             self.culture_system.initialize_district_culture(district_id)
             district.culture = self.culture_system.get_culture(district_id)
             self.districts[district_id] = district
+            
+            # Initialize district dynamics state
+            self.district_dynamics.initialize_district(district_id)
     
     def calculate_pressures(self, district_id: str, weather_state: Dict, 
                            neighboring_districts: List[str]) -> DistrictPressure:
@@ -509,21 +547,83 @@ class WorldDynamicsSystem:
         district = self.districts[district_id]
         self.global_turn = turn
         
-        # Production (reduced by tension)
+        # Production efficiency (reduced by tension)
         production_efficiency = max(0.3, 1.0 - district.tension_state.tension / 200.0)
-        if district.workplace_count > 0:
-            workers = min(agent_count, district.workplace_count * 2)
-            food_produced = int(workers * district.production_rate * production_efficiency * random.uniform(0.8, 1.2))
-            district.food_stock = min(100.0, district.food_stock + food_produced)
-            
-            # Credits production
-            if district.jobs_available > 0:
-                credits_produced = int(district.jobs_available * district.production_rate * production_efficiency * 2)
-                district.credits_pool = min(200.0, district.credits_pool + credits_produced)
         
-        # Consumption (agents consume food)
-        food_consumed = agent_count
-        district.food_stock = max(0.0, district.food_stock - food_consumed)
+        # =====================================================================
+        # AGENT-DRIVEN FOOD SYSTEM
+        # Food is produced by agents farming/hunting (in execute_action)
+        # Here we only handle: consumption, spoilage, natural regen, capacity
+        # =====================================================================
+        
+        # Calculate food capacity (scales with population)
+        from living_matrix.constants.economy_constants import (
+            FOOD_PER_CAPITA_CAPACITY, MIN_FOOD_CAPACITY, MAX_FOOD_CAPACITY,
+            FOOD_CONSUMPTION_PER_AGENT, FOOD_CONSUMPTION_CHILD,
+            NATURAL_FOOD_REGEN_BASE, FOOD_SPOILAGE_RATE, FOOD_SPOILAGE_THRESHOLD,
+            STARVATION_THRESHOLD, SCARCITY_THRESHOLD
+        )
+        
+        total_pop = agent_count + district.child_pool
+        district.food_capacity = max(
+            MIN_FOOD_CAPACITY,
+            min(MAX_FOOD_CAPACITY, total_pop * FOOD_PER_CAPITA_CAPACITY + 100)
+        )
+        
+        # Store population for agent decision making
+        district.population = total_pop
+        
+        # Calculate weather modifiers for agent actions
+        weather_farm_mod = 1.0
+        weather_hunt_mod = 1.0
+        if weather_state:
+            precip = weather_state.get('precipitation', 0)
+            temp = weather_state.get('temperature', 20)
+            if precip > 0.7 or temp > 40 or temp < -10:
+                weather_farm_mod = 0.3
+                weather_hunt_mod = 0.5
+            elif precip > 0.4 or temp > 35 or temp < 0:
+                weather_farm_mod = 0.6
+                weather_hunt_mod = 0.8
+            elif precip < 0.2 and 15 < temp < 30:
+                weather_farm_mod = 1.3
+                weather_hunt_mod = 1.1
+        district.weather_farm_modifier = weather_farm_mod
+        district.weather_hunt_modifier = weather_hunt_mod
+        
+        # Natural food regeneration (environment provides some food)
+        natural_regen = NATURAL_FOOD_REGEN_BASE * production_efficiency * weather_farm_mod
+        district.food_stock = min(district.food_capacity, district.food_stock + natural_regen)
+        
+        # Food consumption (passive - agents also eat via trade action)
+        # Reduced consumption since agents also eat via actions
+        agent_consumption = agent_count * FOOD_CONSUMPTION_PER_AGENT
+        child_consumption = district.child_pool * FOOD_CONSUMPTION_CHILD
+        total_consumption = agent_consumption + child_consumption
+        district.food_stock = max(0.0, district.food_stock - total_consumption)
+        
+        # Food spoilage (only if above threshold)
+        if district.food_stock > FOOD_SPOILAGE_THRESHOLD:
+            spoilage = (district.food_stock - FOOD_SPOILAGE_THRESHOLD) * FOOD_SPOILAGE_RATE
+            district.food_stock -= spoilage
+        
+        # Calculate food per capita for pressure calculation
+        food_per_capita = district.food_stock / max(1, total_pop)
+        
+        # Calculate food pressure (inverse of abundance)
+        if food_per_capita < STARVATION_THRESHOLD:
+            district.pressure.food = 1.0  # Maximum pressure
+        elif food_per_capita < SCARCITY_THRESHOLD:
+            district.pressure.food = 0.7 + (SCARCITY_THRESHOLD - food_per_capita) / SCARCITY_THRESHOLD * 0.3
+        else:
+            district.pressure.food = max(0.0, 0.7 - food_per_capita * 0.2)
+        
+        # =====================================================================
+        # CREDITS PRODUCTION (unchanged)
+        # =====================================================================
+        if district.workplace_count > 0 and district.jobs_available > 0:
+            credits_produced = int(district.jobs_available * district.production_rate * production_efficiency * 2)
+            district.credits_pool = min(200.0, district.credits_pool + credits_produced)
         
         # Jobs regenerate slowly (reduced by tension)
         if district.jobs_available < district.ideal_jobs:
@@ -626,3 +726,125 @@ class WorldDynamicsSystem:
     def get_all_districts(self) -> List[AdvancedDistrict]:
         """Get all districts."""
         return list(self.districts.values())
+    
+    # =========================================================================
+    # DISTRICT DYNAMICS: Wars, Mergers, Collapses
+    # =========================================================================
+    
+    def advance_district_dynamics(self, agents_by_district: Dict[str, int], 
+                                   turn: int) -> List[Tuple[str, str, str]]:
+        """
+        Advance district dynamics (wars, mergers, collapses) for one turn.
+        
+        This should be called ONCE per turn after all individual district advances.
+        
+        Args:
+            agents_by_district: Dict of district_id -> agent count
+            turn: Current turn number
+            
+        Returns:
+            List of (event_type, description, district_id) events
+        """
+        events = self.district_dynamics.advance(
+            self.districts, agents_by_district, turn
+        )
+        
+        # Sync district state with dynamics system
+        for district_id, district in self.districts.items():
+            dyn_state = self.district_dynamics.get_district_state(district_id)
+            
+            # Update district fields from dynamics state
+            district.dynamics_state = dyn_state.state
+            district.is_at_war = dyn_state.state == DistrictState.AT_WAR
+            district.is_collapsed = dyn_state.state == DistrictState.COLLAPSED
+            district.allies = dyn_state.alliance_with
+            district.enemies = dyn_state.enemies
+            
+            # Get war info
+            war_status = self.district_dynamics.get_war_status(district_id)
+            if war_status:
+                district.war_opponent = war_status.get('opponent')
+                district.war_casualties = self._get_war_casualties(district_id)
+            else:
+                district.war_opponent = None
+                district.war_casualties = 0
+        
+        return events
+    
+    def _get_war_casualties(self, district_id: str) -> int:
+        """Get total war casualties for a district."""
+        casualties = 0
+        for war in self.district_dynamics.active_wars.values():
+            if war.attacker_id == district_id:
+                casualties += war.casualties_attacker
+            elif war.defender_id == district_id:
+                casualties += war.casualties_defender
+        return casualties
+    
+    def get_district_war_status(self, district_id: str) -> Optional[Dict]:
+        """Get war status for a specific district."""
+        return self.district_dynamics.get_war_status(district_id)
+    
+    def get_district_dynamics_summary(self, district_id: str) -> Dict:
+        """Get dynamics summary for a district."""
+        return self.district_dynamics.get_district_summary(district_id)
+    
+    def get_global_dynamics_status(self) -> Dict:
+        """Get global district dynamics status."""
+        return self.district_dynamics.get_global_status()
+    
+    def get_active_wars(self) -> List[Dict]:
+        """Get list of all active wars."""
+        wars = []
+        for war in self.district_dynamics.active_wars.values():
+            if war.is_active:
+                attacker = self.districts.get(war.attacker_id)
+                defender = self.districts.get(war.defender_id)
+                wars.append({
+                    "war_id": war.war_id,
+                    "attacker": war.attacker_id,
+                    "attacker_name": attacker.district_name if attacker else war.attacker_id,
+                    "defender": war.defender_id,
+                    "defender_name": defender.district_name if defender else war.defender_id,
+                    "war_type": war.war_type.value,
+                    "duration": war.duration,
+                    "intensity": war.intensity,
+                    "casualties_attacker": war.casualties_attacker,
+                    "casualties_defender": war.casualties_defender,
+                    "status": war.get_status()
+                })
+        return wars
+    
+    def get_collapsed_districts(self) -> List[str]:
+        """Get list of collapsed district IDs."""
+        return [
+            d_id for d_id, state in self.district_dynamics.district_states.items()
+            if state.state == DistrictState.COLLAPSED
+        ]
+    
+    def is_district_active(self, district_id: str) -> bool:
+        """Check if a district is still active (not collapsed)."""
+        state = self.district_dynamics.get_district_state(district_id)
+        return state.state != DistrictState.COLLAPSED
+    
+    def force_alliance(self, district1_id: str, district2_id: str):
+        """Force an alliance between two districts."""
+        state1 = self.district_dynamics.get_district_state(district1_id)
+        state2 = self.district_dynamics.get_district_state(district2_id)
+        
+        state1.alliance_with.add(district2_id)
+        state2.alliance_with.add(district1_id)
+        
+        # Remove from enemies if present
+        state1.enemies.discard(district2_id)
+        state2.enemies.discard(district1_id)
+        
+        logger.info(f"Alliance formed between {district1_id} and {district2_id}")
+    
+    def force_war(self, attacker_id: str, defender_id: str) -> bool:
+        """Force a war to start between two districts."""
+        if attacker_id not in self.districts or defender_id not in self.districts:
+            return False
+        
+        events = self.district_dynamics._start_war(attacker_id, defender_id, self.districts)
+        return len(events) > 0

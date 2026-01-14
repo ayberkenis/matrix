@@ -31,3 +31,54 @@ from .statistics import (
     get_cohort_manager,
     get_sampler
 )
+
+# New optimization modules
+from .world_heartbeat import (
+    WorldHeartbeat,
+    WorldSystem,
+    get_heartbeat,
+    reset_heartbeat,
+)
+from .async_snapshot import (
+    AsyncSnapshotBuilder,
+    DirtyTracker,
+    SnapshotPriority,
+    get_snapshot_builder,
+    init_snapshot_builder,
+    shutdown_snapshot_builder,
+)
+from .aggregate_cache import (
+    AggregateCache,
+    PopulationAggregates,
+    DistrictAggregates,
+    get_aggregate_cache,
+    get_population_aggregates,
+    get_district_aggregates,
+)
+from .agent_scheduler import (
+    AgentScheduler,
+    AgentSleepState,
+    get_agent_scheduler,
+)
+from .cleanup import (
+    CleanupManager,
+    DeadAgentManager,
+    RelationshipPruner,
+    get_cleanup_manager,
+)
+from .population_compression import (
+    PopulationCompressor,
+    CohortStats,
+    get_population_compressor,
+)
+from .watchdog import (
+    TurnTimeWatchdog,
+    TurnTiming,
+    get_watchdog,
+)
+from .optimization import (
+    OptimizationOrchestrator,
+    OptimizationConfig,
+    get_optimizer,
+    reset_optimizer,
+)

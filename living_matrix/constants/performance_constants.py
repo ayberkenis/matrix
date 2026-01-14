@@ -98,6 +98,87 @@ STATISTICAL_SAMPLE_PERCENTAGE = 0.1
 MIN_STATISTICAL_SAMPLE = 50
 
 # ============================================================================
+# WORLD HEARTBEAT (Tick Frequency Control)
+# ============================================================================
+
+# Default tick intervals for world systems (turns between updates)
+# Lower = more frequent updates, Higher = less computation
+ECONOMY_TICK_INTERVAL = int(os.environ.get("LM_ECONOMY_INTERVAL", "3"))
+DISTRICT_STATS_TICK_INTERVAL = int(os.environ.get("LM_DISTRICT_INTERVAL", "5"))
+GLOBAL_METRICS_TICK_INTERVAL = int(os.environ.get("LM_METRICS_INTERVAL", "10"))
+TENSION_UPDATE_TICK_INTERVAL = int(os.environ.get("LM_TENSION_INTERVAL", "2"))
+CULTURE_DRIFT_TICK_INTERVAL = int(os.environ.get("LM_CULTURE_INTERVAL", "20"))
+CAUSALITY_DECAY_TICK_INTERVAL = int(os.environ.get("LM_CAUSALITY_INTERVAL", "5"))
+SNAPSHOT_TICK_INTERVAL = int(os.environ.get("LM_SNAPSHOT_INTERVAL", "1"))
+PERSISTENCE_TICK_INTERVAL = int(os.environ.get("LM_PERSISTENCE_INTERVAL", "10"))
+
+# Population thresholds for interval scaling
+HEARTBEAT_SCALE_THRESHOLD = 500  # Scale intervals above this population
+HEARTBEAT_SCALE_FACTOR = 2  # Multiply intervals by this when population > threshold
+
+# ============================================================================
+# DEAD AGENT CLEANUP
+# ============================================================================
+
+# Maximum number of dead agents to keep in memory
+MAX_DEAD_AGENTS = int(os.environ.get("LM_MAX_DEAD_AGENTS", "500"))
+
+# Number of dead agents to prune when cap is reached
+DEAD_AGENT_PRUNE_COUNT = 100
+
+# Interval for dead agent cleanup (turns)
+DEAD_AGENT_CLEANUP_INTERVAL = 50
+
+# ============================================================================
+# AGGREGATE CACHING
+# ============================================================================
+
+# Maximum age (in turns) for cached aggregates before recomputation
+CACHE_MAX_AGE_POPULATION = 1  # Population counts are critical
+CACHE_MAX_AGE_TENSION = 5  # Tension can be slightly stale
+CACHE_MAX_AGE_METRICS = 10  # Metrics can be more stale
+CACHE_MAX_AGE_DISTRICT = 5  # District summaries
+
+# ============================================================================
+# ASYNC SNAPSHOT
+# ============================================================================
+
+# Enable async snapshot building
+ENABLE_ASYNC_SNAPSHOT = os.environ.get("LM_ASYNC_SNAPSHOT", "true").lower() == "true"
+
+# Maximum pending snapshot requests before dropping
+MAX_SNAPSHOT_QUEUE_SIZE = 10
+
+# ============================================================================
+# AGENT SLEEP/WAKE SYSTEM
+# ============================================================================
+
+# Threshold for agent activity score (below this, agent sleeps)
+AGENT_SLEEP_THRESHOLD = 0.3
+
+# Needs stability threshold (needs below this delta = stable)
+NEEDS_STABILITY_DELTA = 0.05
+
+# Minimum turns before agent can sleep again after waking
+WAKE_COOLDOWN_TURNS = 5
+
+# Maximum fraction of agents that can sleep at once
+MAX_SLEEPING_FRACTION = 0.6
+
+# ============================================================================
+# POPULATION COMPRESSION
+# ============================================================================
+
+# Maximum active (fully simulated) agents
+MAX_ACTIVE_AGENTS = int(os.environ.get("LM_MAX_ACTIVE_AGENTS", "1000"))
+
+# Compression kicks in above this population
+COMPRESSION_THRESHOLD = 800
+
+# Minimum agents to keep active regardless of compression
+MIN_ACTIVE_AGENTS = 200
+
+# ============================================================================
 # OBSERVABILITY (Zero-cost when disabled)
 # ============================================================================
 
@@ -112,6 +193,22 @@ SLOW_TICK_THRESHOLD_MS = 100
 
 # Enable detailed phase timing (more overhead)
 ENABLE_PHASE_TIMING = os.environ.get("LM_PHASE_TIMING", "false").lower() == "true"
+
+# ============================================================================
+# TURN TIME WATCHDOG
+# ============================================================================
+
+# Maximum turn time before emergency mode (milliseconds)
+EMERGENCY_TURN_TIME_MS = int(os.environ.get("LM_EMERGENCY_TIME_MS", "5000"))
+
+# Number of slow turns before emergency mode activates
+SLOW_TURNS_BEFORE_EMERGENCY = 3
+
+# Emergency mode interval multiplier (increases all intervals)
+EMERGENCY_INTERVAL_MULTIPLIER = 3
+
+# Emergency mode maximum active agents
+EMERGENCY_MAX_ACTIVE_AGENTS = 200
 
 
 def get_worker_count() -> int:

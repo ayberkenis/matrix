@@ -18,8 +18,12 @@ POPULATION_DENSITY_FACTOR = 4.0  # How much population density affects reproduct
 MIN_ADULT_SURVIVORS = 2  # Minimum viable population guard (hard rule)
 MAX_ADULT_DEATH_RATE = 0.25  # Never allow > 25% adult death per turn
 
-# Agent roles
-ROLES = ['worker', 'trader', 'guard', 'medic', 'student', 'builder', 'scout', 'keeper']
+# Agent roles (with food production roles)
+ROLES = ['worker', 'trader', 'guard', 'medic', 'student', 'builder', 'scout', 'keeper', 'farmer', 'hunter']
+
+# Food production roles - higher weight for spawning to ensure food production
+FOOD_PRODUCTION_ROLES = ['farmer', 'hunter']
+FOOD_ROLE_SPAWN_WEIGHT = 3  # 3x more likely to spawn as farmer/hunter when food is low
 
 # Agent name parts
 NAME_PARTS = ['Eli', 'Noa', 'Leo', 'Sam', 'Theo', 'Max', 'Alex', 'Luca', 'Ezra', 'Milo',

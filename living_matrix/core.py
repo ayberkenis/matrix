@@ -11,6 +11,10 @@ from typing import Optional, Tuple, List
 
 logger = logging.getLogger(__name__)
 
+# DEBUG PROFILING: Import profiler for performance analysis
+# Enable via: LM_DEBUG_PROFILE=true environment variable
+from living_matrix.utils.debug_profiler import get_profiler, is_profiling_enabled
+
 from .world import World
 from .agents import Coordinator
 from .metrics import MetricsTracker
@@ -1033,7 +1037,12 @@ class Simulation:
         """Execute one simulation step."""
         state = self.world.state
         
+        # DEBUG PROFILING: Start turn timing
+        _profiler = get_profiler()
+        _profiler.start_turn(state.turn)
+        
         # ===== PHASE A: THINKING (always happens) =====
+        _profiler.start_phase("phase_a_thinking")
         
         # Process user input if provided (high-weight stimulus)
         interaction_intensity = 0.0
@@ -1129,7 +1138,10 @@ class Simulation:
         # Update drives (always, even in silence)
         self.world.update_drives(diversity, coherence, novelty, interaction_intensity)
         
+        _profiler.end_phase("phase_a_thinking")
+        
         # ===== PHASE B: SPEAKING (conditional) =====
+        _profiler.start_phase("phase_b_speaking")
         
         # Determine if we should generate visible output
         vocab_size = len(state.tensor_cognition.token_to_id) if state.tensor_cognition else 0
@@ -1288,12 +1300,17 @@ class Simulation:
         if self.ui_panels.should_render(state.turn) or should_speak:
             self._render_ui(state.turn)
         
+        _profiler.end_phase("phase_b_speaking")
+        
         # Advance world simulation if initialized
+        _profiler.start_phase("phase_c_world_tick")
         if self.time_system and self.world_map and self.weather_system and \
            self.agent_system and self.event_system:
             self._world_tick()
+        _profiler.end_phase("phase_c_world_tick")
         
         # Auto-save (snapshots and metrics)
+        _profiler.start_phase("phase_d_persistence")
         if state.turn % self.auto_save_interval == 0:
             # Write snapshot to PostgreSQL
             self.world.save()
@@ -1305,6 +1322,38 @@ class Simulation:
                 )
             # Write metrics to PostgreSQL
             self._write_metrics(state.turn)
+        _profiler.end_phase("phase_d_persistence")
+        
+        # DEBUG PROFILING: Record population and collection metrics
+        if is_profiling_enabled() and self.human_agent_system:
+            alive_count = len([a for a in self.human_agent_system.agents.values() if a.is_alive])
+            inactive_count = len(self.human_agent_system.agents) - alive_count
+            child_pool = sum(self.human_agent_system.child_pools.values())
+            dead_count = len(self.human_agent_system.dead_agents)
+            
+            _profiler.record_population(
+                active_agents=alive_count,
+                inactive_agents=inactive_count,
+                child_pool=child_pool,
+                dead_agents=dead_count
+            )
+            
+            # Count relationships and beliefs across all agents
+            total_relationships = sum(len(a.relationships) for a in self.human_agent_system.agents.values())
+            total_beliefs = sum(len(a.beliefs) for a in self.human_agent_system.agents.values())
+            total_memory = sum(len(a.memory) for a in self.human_agent_system.agents.values())
+            
+            _profiler.record_collections(
+                relationships=total_relationships,
+                beliefs=total_beliefs,
+                memory_entries=total_memory
+            )
+            
+            # Estimate memory usage
+            _profiler.estimate_memory(self)
+        
+        # DEBUG PROFILING: End turn and output metrics
+        _profiler.end_turn()
     
     def _world_tick(self):
         """Advance world simulation by one turn with consequences."""
@@ -1606,14 +1655,98 @@ class Simulation:
             all_human_events = []
             use_advanced = self.world_dynamics_system is not None
             
+            # =========================================================================
+            # PERF OPTIMIZATION: Pre-compute ONCE per turn (not per district!)
+            # These were being recomputed 10+ times per turn (once per district)
+            # =========================================================================
+            
+            # Cache alive agents count (used multiple times)
+            _all_agents = list(self.human_agent_system.agents.values())
+            alive_agents = [a for a in _all_agents if a.is_alive]
+            alive_count = len(alive_agents)
+            
+            # Pre-compute agents by district (O(n) once vs O(n*d) per district)
+            agents_by_district = {}
+            for a in _all_agents:
+                if a.district not in agents_by_district:
+                    agents_by_district[a.district] = []
+                agents_by_district[a.district].append(a)
+            
+            # Cache recent deaths and trauma (constant per turn)
+            current_turn = self.world.state.turn
+            recent_deaths = sum(1 for a in self.human_agent_system.dead_agents.values() 
+                              if a.death_turn and (current_turn - a.death_turn) <= 50)
+            self.world.state.deaths_last_50_turns = recent_deaths
+            trauma_increase = recent_deaths * 0.02
+            self.world.state.generational_trauma = min(1.0, 
+                self.world.state.generational_trauma * 0.99 + trauma_increase)
+            
+            # SYSTEM C: Death panic mode (constant per turn)
+            death_panic_threshold = 15
+            death_panic_mode = alive_count < death_panic_threshold
+            
+            # SYSTEM B: Pre-compute child bonuses ONCE (not per district)
+            mature_children_bonus = 0.0
+            child_cluster_bonus = 0.0
+            if self.human_agent_system:
+                # Mature children bonus
+                mature_children = [a for a in alive_agents if a.age >= 100 and len(a.parents_ids) > 0]
+                mature_children_bonus = sum(a.future_resource_bonus for a in mature_children) * 0.1
+                
+                # Child clusters bonus (children with same location)
+                children_by_location = {}
+                for a in alive_agents:
+                    if a.age < 200 and len(a.parents_ids) > 0:
+                        loc = a.location
+                        if loc not in children_by_location:
+                            children_by_location[loc] = []
+                        children_by_location[loc].append(a)
+                
+                for loc, children in children_by_location.items():
+                    if len(children) >= 3:
+                        child_cluster_bonus += sum(c.future_resource_bonus for c in children) * 0.15
+            
+            food_efficiency_bonus = mature_children_bonus + child_cluster_bonus
+            tension_reduction = (mature_children_bonus + child_cluster_bonus) * 5.0
+            
+            # Pre-compute child pools
+            child_pools = self.human_agent_system.child_pools
+            global_child_pool = sum(child_pools.values())
+            global_total_population = alive_count + global_child_pool
+            
+            # SYSTEM 11: Compute global population pressure and extinction risk ONCE
+            safe_threshold = 30
+            population_pressure = max(0.0, min(1.0, 1.0 - (alive_count / safe_threshold)))
+            
+            extinction_risk = 0.0
+            if alive_count < 10:
+                extinction_risk = 1.0 - (alive_count / 10.0)
+            elif self.world.state.turns_since_last_birth > 50:
+                extinction_risk = min(0.9, self.world.state.turns_since_last_birth / 100.0)
+            
+            # Update global population metrics ONCE (not per district)
+            self.world.state.active_agents = alive_count
+            self.world.state.total_child_pool = global_child_pool
+            self.world.state.total_population = global_total_population
+            self.world.state.population_pressure = population_pressure
+            self.world.state.extinction_risk = extinction_risk
+            
+            # Cache neighbor IDs (same for all districts - list of all other districts)
+            all_district_ids = list(self.world_map.regions.keys())
+            
+            # =========================================================================
+            # Per-district loop (now much lighter)
+            # =========================================================================
             for district_id, region in self.world_map.regions.items():
-                # Get agents in this district
-                district_agents = [a for a in self.human_agent_system.agents.values() 
-                                 if a.district == district_id]
+                # Get agents in this district from cache (O(1) dict lookup)
+                district_agents = agents_by_district.get(district_id, [])
                 agent_count = len(district_agents)
                 
-                # Get neighboring districts
-                neighbor_ids = [r_id for r_id in self.world_map.regions.keys() if r_id != district_id]
+                # Get neighboring districts (exclude self)
+                neighbor_ids = [d_id for d_id in all_district_ids if d_id != district_id]
+                
+                # Get child pool for this district
+                child_pool = child_pools.get(district_id, 0)
                 
                 if use_advanced:
                     # Use advanced world dynamics
@@ -1630,71 +1763,34 @@ class Simulation:
                     
                     # Advance world dynamics
                     self.world_dynamics_system.advance(
-                        district_id, agent_count, weather_state, neighbor_ids, self.world.state.turn
+                        district_id, agent_count, weather_state, neighbor_ids, current_turn
                     )
                     
                     # Get district resources from world dynamics
                     district = self.world_dynamics_system.get_district(district_id)
                     
-                    # Initialize birth_pressure early (before it's used in trauma effects)
+                    # Initialize birth_pressure early
                     birth_pressure = 0.0
                     
-                    # Calculate survival systems BEFORE applying to district resources
-                    alive_count = len([a for a in self.human_agent_system.agents.values() if a.is_alive])
-                    # SYSTEM C: Death panic mode (population < threshold)
-                    death_panic_threshold = 15
-                    death_panic_mode = alive_count < death_panic_threshold
-                    # SYSTEM D: Update generational trauma
-                    recent_deaths = sum(1 for a in self.human_agent_system.dead_agents.values() 
-                                      if a.death_turn and (self.world.state.turn - a.death_turn) <= 50)
-                    self.world.state.deaths_last_50_turns = recent_deaths
-                    trauma_increase = recent_deaths * 0.02
-                    self.world.state.generational_trauma = min(1.0, 
-                        self.world.state.generational_trauma * 0.99 + trauma_increase)
-                    
                     if district:
-                        # SYSTEM B: Apply future resource bonus from children
-                        # Count mature children (age >= 100) and child clusters (3+ children together)
-                        mature_children_bonus = 0.0
-                        child_cluster_bonus = 0.0
-                        if self.human_agent_system:
-                            mature_children = [a for a in self.human_agent_system.agents.values() 
-                                             if a.is_alive and a.age >= 100 and len(a.parents_ids) > 0]
-                            mature_children_bonus = sum(a.future_resource_bonus for a in mature_children) * 0.1
-                            
-                            # Check for child clusters (3+ children at same location)
-                            children_by_location = {}
-                            for a in self.human_agent_system.agents.values():
-                                if a.is_alive and a.age < 200 and len(a.parents_ids) > 0:
-                                    if a.location not in children_by_location:
-                                        children_by_location[a.location] = []
-                                    children_by_location[a.location].append(a)
-                            
-                            for loc, children in children_by_location.items():
-                                if len(children) >= 3:
-                                    cluster_bonus = sum(c.future_resource_bonus for c in children) * 0.15
-                                    child_cluster_bonus += cluster_bonus
-                        
-                        # Apply bonuses to food efficiency and tension reduction
-                        food_efficiency_bonus = mature_children_bonus + child_cluster_bonus
-                        tension_reduction = (mature_children_bonus + child_cluster_bonus) * 5.0
-                        
+                        # Build district_resources using pre-computed values
                         district_resources = {
-                            "food_stock": district.food_stock * (1.0 + food_efficiency_bonus),  # SYSTEM B: Children create resources
+                            "food_stock": district.food_stock * (1.0 + food_efficiency_bonus),
+                            "food_capacity": getattr(district, 'food_capacity', 1000),
+                            "population": getattr(district, 'population', agent_count + child_pool),
+                            "weather_farm_modifier": getattr(district, 'weather_farm_modifier', 1.0),
+                            "weather_hunt_modifier": getattr(district, 'weather_hunt_modifier', 1.0),
                             "credits_pool": district.credits_pool,
                             "jobs_available": district.jobs_available,
                             "security_level": district.security_level,
-                            "tension": max(0, district.tension_state.tension - tension_reduction),  # SYSTEM B: Lower tension
-                            "scarcity": district.pressure.food > 0.7  # Derived from pressure
+                            "tension": max(0, district.tension_state.tension - tension_reduction),
+                            "scarcity": district.pressure.food > 0.7
                         }
                         
                         # SYSTEM C: Death panic mode - auto-resolve conflicts, share food, reduce tension
                         if death_panic_mode:
-                            # Auto-resolve conflicts (reduce tension aggressively)
                             district.tension_state.tension = max(0, district.tension_state.tension * 0.7)
-                            # Share food automatically (increase food stock)
                             district.food_stock = min(100, district.food_stock * 1.2)
-                            # Force migration toward fertile zones (handled in agent movement)
                             district_resources["tension"] = max(0, district_resources["tension"] - 20)
                             district_resources["food_stock"] = min(100, district_resources["food_stock"] * 1.15)
                         
@@ -1724,7 +1820,9 @@ class Simulation:
                                 f"{event_type_str} in {district.district_name}", 
                                 event_type_str))
                     else:
-                        district_resources = {"food_stock": 50, "credits_pool": 100, "jobs_available": 5, 
+                        district_resources = {"food_stock": 200, "food_capacity": 500, "population": 50,
+                                            "weather_farm_modifier": 1.0, "weather_hunt_modifier": 1.0,
+                                            "credits_pool": 100, "jobs_available": 5, 
                                             "security_level": 70, "tension": 20, "scarcity": False}
                 else:
                     # Fallback to old economy system
@@ -1732,13 +1830,14 @@ class Simulation:
                         district_resources = self.economy_system.get_district_resources(district_id)
                         self.economy_system.advance(district_id, agent_count, [])
                     else:
-                        district_resources = {"food_stock": 50, "credits_pool": 100, "jobs_available": 5, 
+                        district_resources = {"food_stock": 200, "food_capacity": 500, "population": 50,
+                                            "weather_farm_modifier": 1.0, "weather_hunt_modifier": 1.0,
+                                            "credits_pool": 100, "jobs_available": 5, 
                                             "security_level": 70, "tension": 20, "scarcity": False}
                 
-                # POPULATION COMPRESSION: Calculate total population (active + children)
-                child_pool = self.human_agent_system.child_pools.get(district_id, 0)
-                district_active_agents = len([a for a in self.human_agent_system.agents.values() 
-                                             if a.is_alive and a.district == district_id])
+                # POPULATION COMPRESSION: Use cached values (computed before loop)
+                # district_active_agents already computed as len(district_agents)
+                district_active_agents = len([a for a in district_agents if a.is_alive])
                 total_district_population = district_active_agents + child_pool
                 
                 # Update district with population metrics
@@ -1748,87 +1847,40 @@ class Simulation:
                     district.total_population = total_district_population
                 
                 # POPULATION COMPRESSION: Calculate district-level population pressure
-                # Pressure increases when:
-                # - child_pool is high relative to resources
-                # - food per capita is low
-                # - jobs are scarce relative to population
                 district_population_pressure = 0.0
                 if district:
                     # Food pressure: low food per capita
                     food_per_capita = district.food_stock / max(1, total_district_population)
-                    food_pressure = max(0.0, min(1.0, 1.0 - (food_per_capita / 5.0)))  # 5 food per capita is ideal
+                    food_pressure = max(0.0, min(1.0, 1.0 - (food_per_capita / 5.0)))
                     
                     # Job pressure: jobs per capita
                     jobs_per_capita = district.jobs_available / max(1, district_active_agents)
-                    job_pressure = max(0.0, min(1.0, 1.0 - (jobs_per_capita / 0.5)))  # 0.5 jobs per agent is ideal
+                    job_pressure = max(0.0, min(1.0, 1.0 - (jobs_per_capita / 0.5)))
                     
-                    # Child pool pressure: too many children relative to adults
+                    # Child pool pressure
                     if district_active_agents > 0:
                         child_to_adult_ratio = child_pool / district_active_agents
-                        child_pressure = max(0.0, min(1.0, (child_to_adult_ratio - 0.5) / 2.0))  # >0.5 ratio = pressure
+                        child_pressure = max(0.0, min(1.0, (child_to_adult_ratio - 0.5) / 2.0))
                     else:
                         child_pressure = 0.0
                     
-                    # Combined population pressure
                     district_population_pressure = (food_pressure * 0.4 + job_pressure * 0.3 + child_pressure * 0.3)
                     district.population_pressure = district_population_pressure
-                    
-                    # Population pressure affects tension
                     district.tension_state.tension = min(100, district.tension_state.tension + district_population_pressure * 2.0)
                 
-                # SYSTEM 11: Calculate global population pressure and extinction risk
-                alive_count = len([a for a in self.human_agent_system.agents.values() if a.is_alive])
-                global_child_pool = sum(self.human_agent_system.child_pools.values())
-                global_total_population = alive_count + global_child_pool
+                # SYSTEM 11: Use cached global values (already computed before loop)
+                # population_pressure and extinction_risk are same for all districts
+                # Compute once, reuse
                 
-                safe_threshold = 30  # Minimum safe population
-                population_pressure = max(0.0, min(1.0, 1.0 - (alive_count / safe_threshold)))
-                
-                # Extinction risk: increases if population is very low or no births for many turns
-                extinction_risk = 0.0
-                if alive_count < 10:
-                    extinction_risk = 1.0 - (alive_count / 10.0)
-                elif self.world.state.turns_since_last_birth > 50:
-                    extinction_risk = min(0.9, self.world.state.turns_since_last_birth / 100.0)
-                
-                # Update global population metrics
-                self.world.state.active_agents = alive_count
-                self.world.state.total_child_pool = global_child_pool
-                self.world.state.total_population = global_total_population
-                
-                # POPULATION COMPRESSION: Calculate civilization phase
-                self.world.state.civilization_phase = self._calculate_civilization_phase(
-                    alive_count, global_child_pool, global_total_population,
-                    population_pressure, extinction_risk, district_population_pressure if district else 0.0
-                )
-                
-                # SYSTEM C: Death panic mode (population < threshold)
-                death_panic_threshold = 15
-                death_panic_mode = alive_count < death_panic_threshold
-                
-                # SYSTEM D: Update generational trauma
-                # Track deaths in last 50 turns
-                recent_deaths = sum(1 for a in self.human_agent_system.dead_agents.values() 
-                                  if a.death_turn and (self.world.state.turn - a.death_turn) <= 50)
-                self.world.state.deaths_last_50_turns = recent_deaths
-                # Trauma accumulates: each death adds 0.02, decays slowly
-                trauma_increase = recent_deaths * 0.02
-                self.world.state.generational_trauma = min(1.0, 
-                    self.world.state.generational_trauma * 0.99 + trauma_increase)
-                
-                # SYSTEM E: Population floor - suspend non-age deaths when population <= 2
+                # SYSTEM E: Population floor (computed once)
                 population_floor_active = alive_count <= 2
                 
-                # Update world state
-                self.world.state.population_pressure = population_pressure
-                self.world.state.extinction_risk = extinction_risk
-                
                 # SYSTEM 13: Calculate district birth pressure
-                birth_pressure = 0.0
                 if district:
-                    # Birth pressure increases with population pressure and low population
                     birth_pressure = population_pressure * 0.7 + (1.0 - (alive_count / 50.0)) * 0.3
                     district.birth_pressure = birth_pressure
+                else:
+                    birth_pressure = 0.0
                 
                 # Advance human agents
                 location_ids = [loc.id for loc in region.locations]
@@ -1856,8 +1908,24 @@ class Simulation:
             # Store human events for UI rendering
             self._last_human_events = all_human_events
             
-            # SYSTEM 15: Check for extinction
-            alive_count = len([a for a in self.human_agent_system.agents.values() if a.is_alive])
+            # Calculate civilization phase ONCE after all districts processed
+            avg_district_pressure = 0.0
+            district_count = 0
+            if self.world_dynamics_system:
+                for district_id in all_district_ids:
+                    district = self.world_dynamics_system.get_district(district_id)
+                    if district:
+                        avg_district_pressure += getattr(district, 'population_pressure', 0.0)
+                        district_count += 1
+                if district_count > 0:
+                    avg_district_pressure /= district_count
+            
+            self.world.state.civilization_phase = self._calculate_civilization_phase(
+                alive_count, global_child_pool, global_total_population,
+                population_pressure, extinction_risk, avg_district_pressure
+            )
+            
+            # SYSTEM 15: Check for extinction (use cached alive_count)
             if alive_count == 0 and self.world.state.world_state == "alive":
                 # Extinction occurred
                 self.world.state.world_state = "dead_world"

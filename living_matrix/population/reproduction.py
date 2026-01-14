@@ -1,10 +1,14 @@
 """Reproduction functions."""
 
 import random
+import time
 from typing import List, Dict, Tuple, TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from living_matrix.human_agent import HumanAgent
+
+# DEBUG PROFILING: Import profiler for performance analysis
+from living_matrix.utils.debug_profiler import get_profiler, is_profiling_enabled
 
 # Performance optimization: limit pair checks to prevent O(n²) slowdown
 # Reduced further for large populations
@@ -21,6 +25,10 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
     """
     Check for reproduction opportunities (SYSTEM 12 - FORCED REPRODUCTION).
     
+    PERFORMANCE NOTE: This function can become O(n²) with large populations.
+    The MAX_REPRODUCTION_PAIRS_TO_CHECK constant limits pair checks to prevent
+    severe slowdown, but this is still a bottleneck at scale.
+    
     Args:
         agents: List of agents to check
         district_resources: District resource dictionary
@@ -34,6 +42,11 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
     Returns:
         List of (parent1_id, parent2_id) tuples for new births
     """
+    # DEBUG PROFILING: Track reproduction check timing
+    _profiler = get_profiler()
+    _profiler.start_phase("check_reproduction")
+    _repro_start = time.perf_counter()
+    
     births = []
     # Make food requirement less strict - only need food if tension is very high
     food_stock = district_resources.get("food_stock", 50)
@@ -269,6 +282,16 @@ def check_reproduction(agents: List['HumanAgent'], district_resources: Dict,
     elif len(reproductive_agents) > 0:
         msg = f"Reproduction check: {len(reproductive_agents)} reproductive agents but 0 pairs checked (all same sex or different locations?)"
         logger.warning(msg)
+    
+    # DEBUG PROFILING: End reproduction timing and log if slow
+    _profiler.end_phase("check_reproduction")
+    _repro_duration_ms = (time.perf_counter() - _repro_start) * 1000
+    if is_profiling_enabled() and _repro_duration_ms > 100:
+        # Log warning for slow reproduction checks (potential O(n²) bottleneck)
+        logger.warning(
+            f"[SLOW] check_reproduction took {_repro_duration_ms:.1f}ms "
+            f"(agents={len(agents)}, pairs_checked={pairs_checked}, births={len(births)})"
+        )
     
     return births
 
